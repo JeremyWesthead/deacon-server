@@ -12,6 +12,10 @@ pub mod filter;
 pub mod index;
 pub mod minimizers;
 
+#[cfg(feature = "server")]
+pub mod server;
+pub mod server_common;
+
 // Re-export the important structures and functions for library users
 pub use filter::{FilterSummary, run as run_filter};
 pub use index::{
@@ -26,7 +30,7 @@ use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MatchThreshold {
     Absolute(usize),
     Relative(f64),
@@ -179,7 +183,7 @@ impl FilterConfig {
     /// Filter with this configuration
     pub fn execute(&self) -> Result<()> {
         filter::run(
-            &self.minimizers_path,
+            Some(&self.minimizers_path),
             &self.input_path,
             self.input2_path.as_deref(),
             &self.output_path,
@@ -191,6 +195,7 @@ impl FilterConfig {
             self.rename,
             self.threads,
             self.compression_level,
+            None
         )
     }
 }
@@ -271,8 +276,8 @@ impl IndexConfig {
     }
 }
 
-pub fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(FxHashSet<u64>, index::IndexHeader)> {
-    index::load_minimizer_hashes(&path)
+pub fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
+    index::load_minimizer_hashes(&Some(path), &None)
 }
 
 pub fn write_minimizers(

@@ -68,6 +68,68 @@ enum Commands {
         #[arg(long = "compression-level", default_value_t = 2)]
         compression_level: u8,
     },
+
+    #[cfg(feature = "server")]
+    Server {
+        /// Path to minimizer index file
+        index: PathBuf,
+
+        /// Port to run the server on
+        #[arg(short = 'p', long = "port", default_value_t = 8888)]
+        port: u16,
+    },
+
+    /// Alternate version of Filter, swapping local compute for passing to a server
+    /// which has the index pre-loaded
+    #[cfg(feature = "server")]
+    Client {
+        /// Server address to connect to (including port)
+        server_address: String,
+
+        /// Optional path to fastx file (or - for stdin)
+        #[arg(default_value = "-")]
+        input: String,
+
+        /// Optional path to second paired fastx file (or - for interleaved stdin)
+        input2: Option<String>,
+
+        /// Path to output fastx file (or - for stdout; detects .gz and .zst)
+        #[arg(short = 'o', long = "output", default_value = "-")]
+        output: String,
+
+        /// Optional path to second paired output fastx file (detects .gz and .zst)
+        #[arg(short = 'O', long = "output2")]
+        output2: Option<String>,
+
+        /// Mininum number (integer) or proportion (float) of minimizer hits for a match
+        #[arg(short = 'm', long = "matches", default_value_t = MatchThreshold::Absolute(2))]
+        match_threshold: MatchThreshold,
+
+        /// Search only the first N nucleotides per sequence (0 = entire sequence)
+        #[arg(short = 'p', long = "prefix-length", default_value_t = 0)]
+        prefix_length: usize,
+
+        /// Discard matching sequences (invert filtering behaviour)
+        #[arg(short = 'd', long = "deplete", default_value_t = false)]
+        deplete: bool,
+
+        /// Replace sequence headers with incrementing numbers
+        #[arg(short = 'r', long = "rename", default_value_t = false)]
+        rename: bool,
+
+        /// Path to JSON summary output file
+        #[arg(short = 's', long = "summary")]
+        summary: Option<PathBuf>,
+
+        /// Number of execution threads (0 = auto)
+        #[arg(short = 't', long = "threads", default_value_t = 8)]
+        threads: usize,
+
+        /// Output compression level (1-9 for gz & xz; 1-22 for zstd)
+        #[arg(long = "compression-level", default_value_t = 2)]
+        compression_level: u8,
+    },
+
 }
 
 #[derive(Subcommand)]
@@ -135,8 +197,8 @@ enum IndexCommands {
         output: Option<PathBuf>,
     },
 }
-
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Check we have either AVX2 or NEON
     #[cfg(not(any(target_feature = "avx2", target_feature = "neon")))]
     {
@@ -226,9 +288,47 @@ fn main() -> Result<()> {
                 *rename,
                 *threads,
                 *compression_level,
+                None,
             )
             .context("Failed to run filter command")?;
-        }
+        },
+        #[cfg(feature = "server")]
+        Commands::Server { index, port } => {
+            println!("Loading server!");
+            let server = deacon::server::run_server(index.clone(), *port).await;
+        },
+        #[cfg(feature = "server")]
+        Commands::Client {
+            server_address,
+            input,
+            input2,
+            output,
+            output2,
+            match_threshold,
+            prefix_length,
+            summary,
+            deplete,
+            rename,
+            threads,
+            compression_level,
+        } => {
+            // deacon::client::run_client(
+            //     server_address,
+            //     input,
+            //     input2.as_deref(),
+            //     output,
+            //     output2.as_deref(),
+            //     match_threshold,
+            //     *prefix_length,
+            //     summary.as_ref(),
+            //     *deplete,
+            //     *rename,
+            //     *threads,
+            //     *compression_level
+            // )
+            // .context("Failed to run client command")?;
+            println!("Loading client!");
+        },
     }
 
     Ok(())

@@ -10,8 +10,17 @@ use std::time::Instant;
 
 use needletail::{parse_fastx_file, parse_fastx_stdin};
 
-/// Serialisable header for the index file
+use crate::server_common::get_sever_index_header;
+
+/// Serialisable index file
 #[derive(Serialize, Deserialize, Debug)]
+pub struct Index {
+    pub header: IndexHeader,
+    pub minimizers: FxHashSet<u64>,
+}
+
+/// Serialisable header for the index file
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexHeader {
     pub format_version: u8,
     pub kmer_length: u8,
@@ -69,31 +78,47 @@ pub fn load_header_and_count<P: AsRef<Path>>(path: &P) -> Result<(IndexHeader, u
 }
 
 /// Load the hashes without spiking memory usage with an extra vec
-pub fn load_minimizer_hashes<P: AsRef<Path>>(path: &P) -> Result<(FxHashSet<u64>, IndexHeader)> {
-    let file =
-        File::open(path).context(format!("Failed to open index file {:?}", path.as_ref()))?;
-    let mut reader = BufReader::new(file);
+pub fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, server_address_option: &Option<String>) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
+    if let Some(path) = path_option {
+        let file =
+            File::open(path).context(format!("Failed to open index file {:?}", path.as_ref()))?;
+        let mut reader = BufReader::new(file);
 
-    // Deserialise header
-    let header: IndexHeader = decode_from_std_read(&mut reader, bincode::config::standard())
-        .context("Failed to deserialise index header")?;
-    header.validate()?;
+        // Deserialise header
+        let header: IndexHeader = decode_from_std_read(&mut reader, bincode::config::standard())
+            .context("Failed to deserialise index header")?;
+        header.validate()?;
 
-    // Deserialise the count of minimizers so we can init a FxHashSet with the right capacity
-    let count: usize = decode_from_std_read(&mut reader, bincode::config::standard())
-        .context("Failed to deserialise minimizer count")?;
+        // Deserialise the count of minimizers so we can init a FxHashSet with the right capacity
+        let count: usize = decode_from_std_read(&mut reader, bincode::config::standard())
+            .context("Failed to deserialise minimizer count")?;
 
-    // Pre-allocate FxHashSet with correct capacity
-    let mut minimizers = FxHashSet::with_capacity_and_hasher(count, Default::default());
+        // Pre-allocate FxHashSet with correct capacity
+        let mut minimizers = FxHashSet::with_capacity_and_hasher(count, Default::default());
 
-    // Populate FxHashSet
-    for _ in 0..count {
-        let hash: u64 = decode_from_std_read(&mut reader, bincode::config::standard())
-            .context("Failed to deserialise minimizer hash")?;
-        minimizers.insert(hash);
+        // Populate FxHashSet
+        for _ in 0..count {
+            let hash: u64 = decode_from_std_read(&mut reader, bincode::config::standard())
+                .context("Failed to deserialise minimizer hash")?;
+            minimizers.insert(hash);
+        }
+
+        Ok((Some(minimizers), header))
+    } else {
+        // If no path is provided, check if a server adress was given to populate the header
+        #[cfg(feature = "server")]
+        {
+            if let Some(server) = server_address_option {
+                return Ok((None, get_sever_index_header(&server.to_string())?));
+            } else {
+                return Err(anyhow::anyhow!("No server address provided for running in server mode"));
+            }
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            return Err(anyhow::anyhow!("Server feature is not enabled. Cannot run without an index."));
+        }
     }
-
-    Ok((minimizers, header))
 }
 
 /// Helper function to write minimizers to output file or stdout

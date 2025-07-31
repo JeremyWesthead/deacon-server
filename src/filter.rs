@@ -1,3 +1,4 @@
+#[cfg(feature = "server")]
 use crate::MatchThreshold;
 use crate::index::load_minimizer_hashes;
 use crate::minimizers::fill_minimizer_hashes;
@@ -17,6 +18,11 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zstd::stream::write::Encoder as ZstdEncoder;
+
+#[cfg(feature = "server")]
+use reqwest::blocking::Client;
+#[cfg(feature = "server")]
+use crate::server_common::{FilterRequest, FilterResponse};
 
 const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 
@@ -249,8 +255,95 @@ pub struct FilterSummary {
     bp_per_second: u64,
 }
 
+/// Determine if a given set of minimizers matches the index
+pub fn input_matches_index(
+    index_minimizers: &FxHashSet<u64>,
+    input_minimizers: &Vec<u64>,
+    match_threshold: &MatchThreshold
+) -> bool {
+    // Count distinct minimizer hits
+    let mut seen_hits = FxHashSet::default();
+    let mut hit_count = 0;
+    for &hash in input_minimizers {
+        if index_minimizers.contains(&hash) && seen_hits.insert(hash){
+            hit_count += 1;
+        }
+    }
+
+    // Convert threshold to absolute count
+    let required_hits = match match_threshold {
+        MatchThreshold::Absolute(n) => *n,
+        MatchThreshold::Relative(f) => {
+            if input_minimizers.is_empty() {
+                0
+            } else {
+                ((*f * input_minimizers.len() as f64).ceil() as usize).max(1)
+            }
+        }
+    };
+
+    // The input minimizers match the index if it has enough hits
+    hit_count >= required_hits
+}
+
+/// Send minimizers to server for checking against index. 
+/// Equivalent functionality to `input_matches_index, but remote
+#[cfg(feature = "server")]
+fn send_minimizers_to_server(
+    input_minimizers: Vec<u64>,
+    server_address: &str,
+    matches_threshold: &MatchThreshold,
+) -> Result<bool> {
+    // Create a client to send the minimizers to the server
+    let client = Client::new();
+    
+    // Send the minimizers as a POST request
+    let response = client.post(server_address)
+        .json(&FilterRequest{
+            input: input_minimizers,
+            match_threshold: *matches_threshold,
+        })
+        .send()?;
+
+    // Check if the response indicates a match
+    if response.status().is_success() {
+        Ok(response.json::<FilterResponse>()?.index_match)
+    } else {
+        Err(anyhow::anyhow!("Server returned an error: {}", response.status()))
+    }
+}
+
+pub fn check_input_matches_index(
+    index_minimizers: &Option<FxHashSet<u64>>,
+    input_minimizers: &Vec<u64>,
+    match_threshold: &MatchThreshold,
+    server_address: &Option<String>,
+) -> bool {
+    // If index minimizers are provided, check if input matches locally
+    if let Some(index_minimizers) = index_minimizers {
+        input_matches_index(index_minimizers, input_minimizers, match_threshold)
+    } else {
+        // Else, send the input minimizers to the server for checking
+        #[cfg(feature = "server")]
+        {
+            if server_address.is_none() {
+                panic!("Server address is required when using the server feature.");
+            }
+            let server_address = server_address.as_ref().map(String::as_str).unwrap();
+            return send_minimizers_to_server(input_minimizers.to_vec(), server_address, match_threshold)
+                .unwrap_or_else(|e| {
+                    panic!("Error checking input against index: {}", e);
+                });
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            panic!("Server feature is not enabled. Cannot check input against index.");
+        }
+    }
+}
+
 pub fn run<P: AsRef<Path>>(
-    minimizers_path: P,
+    minimizers_path: Option<P>,
     input_path: &str,
     input2_path: Option<&str>,
     output_path: &str,
@@ -262,6 +355,7 @@ pub fn run<P: AsRef<Path>>(
     rename: bool,
     threads: usize,
     compression_level: u8,
+    server_address: Option<String>,
 ) -> Result<()> {
     let start_time = Instant::now();
     let version: String = env!("CARGO_PKG_VERSION").to_string();
@@ -307,7 +401,8 @@ pub fn run<P: AsRef<Path>>(
     );
 
     // Load minimizers hashes and parse header
-    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path)?;
+    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path, &server_address)?;
+
 
     let kmer_length = header.kmer_length();
     let window_size = header.window_size();
@@ -366,6 +461,7 @@ pub fn run<P: AsRef<Path>>(
             &mut output_seq_counter,
             &spinner,
             filtering_start_time,
+            &server_address,
         )?;
     } else if let Some(input2_path) = input2_path {
         process_paired_seqs(
@@ -388,6 +484,7 @@ pub fn run<P: AsRef<Path>>(
             &mut output_seq_counter,
             &spinner,
             filtering_start_time,
+            &server_address,
         )?;
     } else {
         process_single_seqs(
@@ -408,6 +505,7 @@ pub fn run<P: AsRef<Path>>(
             &mut output_seq_counter,
             &spinner,
             filtering_start_time,
+            &server_address,
         )?;
     }
 
@@ -472,9 +570,14 @@ pub fn run<P: AsRef<Path>>(
         // Get number of sequences passing filter
         let seqs_out = total_seqs - filtered_seqs;
 
+        let index = match minimizers_path {
+            Some(path) => path.as_ref().to_string_lossy().to_string(),
+            None => server_address.unwrap(),
+        };
+
         let summary = FilterSummary {
             version: tool_version,
-            index: minimizers_path.as_ref().to_string_lossy().to_string(),
+            index,
             input: input_path.to_string(),
             input2: input2_path.map(|s| s.to_string()),
             output: output_path.to_string(),
@@ -515,7 +618,7 @@ pub fn run<P: AsRef<Path>>(
 }
 
 fn process_single_seqs(
-    minimizer_hashes: &FxHashSet<u64>,
+    minimizer_hashes: &Option<FxHashSet<u64>>,
     input_path: &str,
     writer: &mut Box<dyn FastxWriter>,
     match_threshold: &MatchThreshold,
@@ -532,6 +635,7 @@ fn process_single_seqs(
     output_seq_counter: &mut u64,
     spinner: &ProgressBar,
     filtering_start_time: Instant,
+    server_address: &Option<String>,
 ) -> Result<()> {
     // Create a reader based on the input source
     let mut reader = if input_path == "-" {
@@ -583,10 +687,6 @@ fn process_single_seqs(
 
                 // Pre-allocate buffers for reuse
                 let mut minimizer_buffer = Vec::with_capacity(64);
-                let mut seen_hits = FxHashSet::default();
-
-                // Check for minimizer hits
-                let mut hit_count = 0;
 
                 if seq_len >= kmer_length {
                     // Apply prefix length limit if specified
@@ -603,34 +703,16 @@ fn process_single_seqs(
                         window_size,
                         &mut minimizer_buffer,
                     );
-
-                    // Count distinct minimizer hits
-                    for &hash in &minimizer_buffer {
-                        if minimizer_hashes.contains(&hash) && seen_hits.insert(hash) {
-                            hit_count += 1;
-                        }
-                    }
                 }
-
-                // Convert threshold to absolute count
-                let required_hits = match match_threshold {
-                    MatchThreshold::Absolute(n) => *n,
-                    MatchThreshold::Relative(f) => {
-                        if minimizer_buffer.is_empty() {
-                            0
-                        } else {
-                            ((*f * minimizer_buffer.len() as f64).ceil() as usize).max(1)
-                        }
-                    }
-                };
-
-                let should_output = if deplete {
-                    // Deplete mode: remove sequences that meet the threshold
-                    hit_count < required_hits
-                } else {
-                    // Default mode: keep sequences that meet the threshold
-                    hit_count >= required_hits
-                };
+                
+                // check_input_matches_index returns true if the matches >= match_threshold
+                // If deplete is true, we want to suppress output of sequences that match
+                // The NOT is required due to the logic compared to requirement
+                // matches_index && deplete = true --> false
+                // !matches_index && deplete = false --> true
+                // matches_index && !deplete = false --> true
+                // !matches_index && !deplete = true --> false
+                let should_output = !(check_input_matches_index(minimizer_hashes, &minimizer_buffer, match_threshold, server_address) && deplete);
 
                 (should_output, seq_len)
             })
@@ -715,7 +797,7 @@ fn process_single_seqs(
 }
 
 fn process_paired_seqs(
-    minimizer_hashes: &FxHashSet<u64>,
+    minimizer_hashes: &Option<FxHashSet<u64>>,
     input1_path: &str,
     input2_path: &str,
     writer: &mut Box<dyn FastxWriter>,
@@ -734,6 +816,7 @@ fn process_paired_seqs(
     output_seq_counter: &mut u64,
     spinner: &ProgressBar,
     filtering_start_time: Instant,
+    server_address: &Option<String>,
 ) -> Result<()> {
     // Open both input files
     let mut reader1 = if input1_path == "-" {
@@ -997,7 +1080,7 @@ fn process_paired_seqs(
 }
 
 fn process_interleaved_paired_seqs(
-    minimizer_hashes: &FxHashSet<u64>,
+    minimizer_hashes: &Option<FxHashSet<u64>>,
     writer: &mut Box<dyn FastxWriter>,
     mut writer2: Option<&mut Box<dyn FastxWriter>>,
     match_threshold: &MatchThreshold,
@@ -1014,6 +1097,7 @@ fn process_interleaved_paired_seqs(
     output_seq_counter: &mut u64,
     spinner: &ProgressBar,
     filtering_start_time: Instant,
+    server_address: &Option<String>,
 ) -> Result<()> {
     // Parse FASTX from stdin
     let mut reader = parse_fastx_stdin()?;

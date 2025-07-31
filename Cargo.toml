@@ -32,12 +32,20 @@ needletail = "0.6"
 zstd = "0.13"
 indicatif = "0.17"
 liblzma = "0.3.1"
+tokio = { version = "1.47.0", features = ["full"] }
+axum = { version = "0.8.4", optional = true }
+tracing-subscriber = { version = "0.3.19", features = ["fmt", "registry", "json"], optional = true }
+reqwest = { version = "0.12.22", features = ["blocking", "json"], optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
 tempfile = "3.20"
 rstest = "0.25"
+
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:tracing-subscriber", "dep:reqwest"]
 
 [[test]]
 name = "cli_tests"
