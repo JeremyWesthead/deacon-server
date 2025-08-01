@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct FilterRequest {
     /// Prehashed minimizers for input
-    pub input: Vec<u64>,
+    pub input: Vec<Vec<u64>>,
 
     /// Mininum number (integer) or proportion (float) of minimizer hits for a match
     pub match_threshold: MatchThreshold,
@@ -19,7 +19,7 @@ pub struct FilterRequest {
 #[derive(Serialize, Deserialize)]
 pub struct FilterResponse {
     /// Indicates if the input minimizers match the index
-    pub index_match: bool,
+    pub index_match: Vec<bool>,
 }
 
 /// Get the header of the index loaded into a remote server

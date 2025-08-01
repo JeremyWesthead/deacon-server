@@ -286,6 +286,19 @@ pub fn input_matches_index(
     hit_count >= required_hits
 }
 
+pub fn inputs_match_index(
+    index_minimizers: &FxHashSet<u64>,
+    input_minimizers: &Vec<Vec<u64>>,
+    match_threshold: &MatchThreshold,
+) -> Vec<bool> {
+    input_minimizers
+        .par_iter()
+        .map(|minimizers| {
+            input_matches_index(index_minimizers, minimizers, match_threshold)
+        })
+        .collect()
+}
+
 /// Send minimizers to server for checking against index.
 /// Equivalent functionality to `input_matches_index, but remote
 #[cfg(feature = "server")]
@@ -294,6 +307,38 @@ async fn send_minimizers_to_server(
     server_address: &str,
     matches_threshold: &MatchThreshold,
 ) -> Result<bool> {
+    // Create a client to send the minimizers to the server
+    let client = Client::new();
+
+    // Send the minimizers as a POST request
+    let response = client
+        .post(server_address.to_owned() + "/is_index_match")
+        .json(&FilterRequest {
+            input: vec![input_minimizers],
+            match_threshold: *matches_threshold,
+        })
+        .send()
+        .await?;
+
+    // Check if the response indicates a match
+    if response.status().is_success() {
+        Ok(response.json::<FilterResponse>().await?.index_match[0])
+    } else {
+        Err(anyhow::anyhow!(
+            "Server returned an error: {}",
+            response.status()
+        ))
+    }
+}
+
+/// Send minimizers to server for checking against index.
+/// Equivalent functionality to `input_matches_index, but remote
+#[cfg(feature = "server")]
+async fn send_all_minimizers_to_server(
+    input_minimizers: Vec<Vec<u64>>,
+    server_address: &str,
+    matches_threshold: &MatchThreshold,
+) -> Result<Vec<bool>> {
     // Create a client to send the minimizers to the server
     let client = Client::new();
 
@@ -336,6 +381,44 @@ pub async fn check_input_matches_index(
             }
             let server_address = server_address.as_ref().map(String::as_str).unwrap();
             return send_minimizers_to_server(
+                input_minimizers.to_vec(),
+                server_address,
+                match_threshold,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Error checking input against index: {}", e);
+            });
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            panic!("Server feature is not enabled. Cannot check input against index.");
+        }
+    }
+}
+
+//TODO: Update to use just this function
+// Sever appears to be blocking when the index minimizers are accessed :(
+// So group together the batches of input minimizers and send them all at once
+// Multithreaded server access means we get a resonable filter speed
+pub async fn check_inputs_match_index(
+    index_minimizers: &Option<FxHashSet<u64>>,
+    input_minimizers: &Vec<Vec<u64>>,
+    match_threshold: &MatchThreshold,
+    server_address: &Option<String>,
+) -> Vec<bool> {
+    // If index minimizers are provided, check if input matches locally
+    if let Some(index_minimizers) = index_minimizers {
+        inputs_match_index(index_minimizers, input_minimizers, match_threshold)
+    } else {
+        // Else, send the input minimizers to the server for checking
+        #[cfg(feature = "server")]
+        {
+            if server_address.is_none() {
+                panic!("Server address is required when using the server feature.");
+            }
+            let server_address = server_address.as_ref().map(String::as_str).unwrap();
+            return send_all_minimizers_to_server(
                 input_minimizers.to_vec(),
                 server_address,
                 match_threshold,
@@ -631,18 +714,38 @@ pub async fn run<P: AsRef<Path>>(
 }
 
 async fn record_match(
-    record_data: &RecordData,
-    kmer_length: usize,
-    prefix_length: usize,
-    window_size: usize,
+    record_hashes: &Vec<u64>,
     minimizer_hashes: &Option<FxHashSet<u64>>,
     match_threshold: &MatchThreshold,
     server_address: &Option<String>,
     deplete: bool,
-) -> (bool, usize) {
-    let seq_len = record_data.seq.len();
+) -> bool {
+    // check_input_matches_index returns true if the matches >= match_threshold
+    // If deplete is true, we want to suppress output of sequences that match
+    // The NOT is required due to the logic compared to requirement
+    // matches_index && deplete = true --> false
+    // !matches_index && deplete = false --> true
+    // matches_index && !deplete = false --> true
+    // !matches_index && !deplete = true --> false
+    let should_output = !(check_input_matches_index(
+        minimizer_hashes,
+        record_hashes,
+        match_threshold,
+        server_address,
+    )
+    .await
+        && deplete);
 
-    // Pre-allocate buffers for reuse
+    should_output
+}
+
+fn get_hashes_from_record(
+    record_data: &RecordData,
+    kmer_length: usize,
+    prefix_length: usize,
+    window_size: usize,
+) -> (Vec<u64>, usize) {
+    let seq_len = record_data.seq.len();
     let mut minimizer_buffer = Vec::with_capacity(64);
 
     if seq_len >= kmer_length {
@@ -662,23 +765,19 @@ async fn record_match(
         );
     }
 
-    // check_input_matches_index returns true if the matches >= match_threshold
-    // If deplete is true, we want to suppress output of sequences that match
-    // The NOT is required due to the logic compared to requirement
-    // matches_index && deplete = true --> false
-    // !matches_index && deplete = false --> true
-    // matches_index && !deplete = false --> true
-    // !matches_index && !deplete = true --> false
-    let should_output = !(check_input_matches_index(
-        minimizer_hashes,
-        &minimizer_buffer,
-        match_threshold,
-        server_address,
-    )
-    .await
-        && deplete);
+    (minimizer_buffer, seq_len)
+}
 
-    (should_output, seq_len)
+fn separate_tuple_vec<T, T2>(input_vec: Vec<(T, T2)>) -> (Vec<T>, Vec<T2>) {
+    let mut first = Vec::with_capacity(input_vec.len());
+    let mut second = Vec::with_capacity(input_vec.len());
+
+    for (a, b) in input_vec {
+        first.push(a);
+        second.push(b);
+    }
+
+    (first, second)
 }
 
 async fn process_single_seqs(
@@ -744,33 +843,56 @@ async fn process_single_seqs(
         }
 
         // Process batch in parallel
-        let batch_results: Vec<_> = batch
+        // let batch_results: Vec<_> = batch
+        //     .par_iter()
+        //     .map(|record_data| {
+        //         record_match(
+        //             record_data,
+        //             kmer_length,
+        //             prefix_length,
+        //             window_size,
+        //             minimizer_hashes,
+        //             match_threshold,
+        //             server_address,
+        //             deplete,
+        //         )
+        //     })
+        //     .collect();
+
+        let batch_result = batch
             .par_iter()
             .map(|record_data| {
-                record_match(
+                get_hashes_from_record(
                     record_data,
                     kmer_length,
                     prefix_length,
                     window_size,
-                    minimizer_hashes,
-                    match_threshold,
-                    server_address,
-                    deplete,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        
+        let (batch_hashes, seq_lens): (Vec<_>, Vec<_>) = separate_tuple_vec(batch_result);
+        
+        
+        let batch_matches = check_inputs_match_index(
+            minimizer_hashes,
+            &batch_hashes,
+            match_threshold,
+            server_address,
+        ).await;
+        
+        
 
         // Process results sequentially to maintain order
-        for (i, result) in batch_results.into_iter().enumerate() {
-            let (should_output, seq_len) = result.await;
+        for (i, (seq_len, seq_match)) in seq_lens.iter().zip(batch_matches).enumerate() {
             let record_data = &batch[i];
-
+            let should_output = !(seq_match && deplete);
             *total_seqs += 1;
-            *total_bp += seq_len as u64;
+            *total_bp += *seq_len as u64;
 
             if should_output {
                 // Track output base pairs
-                *output_bp += seq_len as u64;
+                *output_bp += *seq_len as u64;
 
                 // Increment output sequence counter
                 *output_seq_counter += 1;
@@ -789,7 +911,7 @@ async fn process_single_seqs(
                 writer.write_all(&output_record_buffer)?;
             } else {
                 *filtered_seqs += 1;
-                *filtered_bp += seq_len as u64;
+                *filtered_bp += *seq_len as u64;
             }
         }
 

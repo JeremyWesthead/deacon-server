@@ -2,14 +2,14 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use crate::filter::input_matches_index;
-use crate::index::{Index, IndexHeader, load_minimizer_hashes};
+use crate::filter::inputs_match_index;
+use crate::index::{IndexHeader, load_minimizer_hashes};
 use crate::server_common::{FilterRequest, FilterResponse};
 use axum::{
     Json, Router,
     routing::{get, post},
+    extract::{DefaultBodyLimit},
 };
-use reqwest::header;
 use rustc_hash::FxHashSet;
 
 static INDEX: OnceLock<FxHashSet<u64>> = OnceLock::new();
@@ -29,7 +29,9 @@ pub async fn run_server(index_path: PathBuf, port: u16) {
         // `GET /index_header` returns the index header
         .route("/index_header", get(index_header))
         // `POST /filter` goes to `filter`
-        .route("/is_index_match", post(is_index_match));
+        .route("/is_index_match", post(is_index_match))
+        // Increase the body limit to 2GB to ensure we don't error on large payloads
+        .layer(DefaultBodyLimit::max(2147483648));
 
     // run our app with hyper, listening globally
     let listener = tokio::net::TcpListener::bind("0.0.0.0:".to_owned() + &port.to_string())
@@ -74,7 +76,7 @@ async fn index_header() -> Json<IndexHeader> {
 // Endpoint which takes a set of hashes, returning whether they match the index
 async fn is_index_match(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
     Json(FilterResponse {
-        index_match: input_matches_index(
+        index_match: inputs_match_index(
             &INDEX.get().expect("Index not loaded"),
             &request.input,
             &request.match_threshold,
