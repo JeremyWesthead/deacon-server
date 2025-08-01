@@ -1,6 +1,6 @@
 //! Common structures and types used in the client and server
 use crate::{IndexHeader, MatchThreshold};
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 
@@ -23,7 +23,7 @@ pub struct FilterResponse {
 }
 
 /// Get the header of the index loaded into a remote server
-pub fn get_sever_index_header(
+pub async fn get_sever_index_header(
     server_address: &str,
 ) -> Result<IndexHeader> {
     // Create a client to send the minimizers to the server
@@ -31,11 +31,11 @@ pub fn get_sever_index_header(
     
     // Send the minimizers as a POST request
     let response = client.get(server_address.to_owned() + "/index_header")
-        .send()?;
+        .send().await?;
 
     // Check if the response indicates a match
     if response.status().is_success() {
-        Ok(response.json::<IndexHeader>()?)
+        Ok(response.json::<IndexHeader>().await?)
     } else {
         Err(anyhow::anyhow!("Server returned an error: {}", response.status()))
     }

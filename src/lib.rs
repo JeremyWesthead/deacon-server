@@ -181,7 +181,7 @@ impl FilterConfig {
     }
 
     /// Filter with this configuration
-    pub fn execute(&self) -> Result<()> {
+    pub async fn execute(&self) -> Result<()> {
         filter::run(
             Some(&self.minimizers_path),
             &self.input_path,
@@ -196,7 +196,7 @@ impl FilterConfig {
             self.threads,
             self.compression_level,
             None
-        )
+        ).await
     }
 }
 
@@ -276,8 +276,8 @@ impl IndexConfig {
     }
 }
 
-pub fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
-    index::load_minimizer_hashes(&Some(path), &None)
+pub async fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
+    index::load_minimizer_hashes(&Some(path), &None).await
 }
 
 pub fn write_minimizers(

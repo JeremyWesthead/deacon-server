@@ -78,7 +78,7 @@ pub fn load_header_and_count<P: AsRef<Path>>(path: &P) -> Result<(IndexHeader, u
 }
 
 /// Load the hashes without spiking memory usage with an extra vec
-pub fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, server_address_option: &Option<String>) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
+pub async fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, server_address_option: &Option<String>) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
     if let Some(path) = path_option {
         let file =
             File::open(path).context(format!("Failed to open index file {:?}", path.as_ref()))?;
@@ -109,7 +109,7 @@ pub fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, server_add
         #[cfg(feature = "server")]
         {
             if let Some(server) = server_address_option {
-                return Ok((None, get_sever_index_header(&server.to_string())?));
+                return Ok((None, get_sever_index_header(&server.to_string()).await?));
             } else {
                 return Err(anyhow::anyhow!("No server address provided for running in server mode"));
             }
@@ -416,7 +416,7 @@ fn stream_diff_fastx<P: AsRef<Path>>(
 }
 
 /// Compute the set difference between two minimizer indexes (A - B)
-pub fn diff<P: AsRef<Path>>(
+pub async fn diff<P: AsRef<Path>>(
     first: P,
     second: P,
     kmer_length: Option<usize>,
@@ -424,9 +424,15 @@ pub fn diff<P: AsRef<Path>>(
     output: Option<&PathBuf>,
 ) -> Result<()> {
     let start_time = Instant::now();
+    let first = Some(first);
+    let second = Some(second);
 
     // Load first file (always an index)
-    let (mut first_minimizers, header) = load_minimizer_hashes(&first)?;
+    let (mut first_minimizers, header) = load_minimizer_hashes(&first, &None).await?;
+    if first_minimizers.is_none() {
+        return Err(anyhow::anyhow!("Failed to load first index file"));
+    }
+    let mut first_minimizers = first_minimizers.unwrap();
     eprintln!("First index: loaded {} minimizers", first_minimizers.len());
 
     // Guess if second file is an index or FASTX file
@@ -434,7 +440,7 @@ pub fn diff<P: AsRef<Path>>(
         // Second file is a FASTX file - stream diff with provided k, w
         let before_count = first_minimizers.len();
         let (_seq_count, _total_bp) =
-            stream_diff_fastx(&second, k, w, &header, &mut first_minimizers)?;
+            stream_diff_fastx(&second.unwrap(), k, w, &header, &mut first_minimizers)?;
 
         // Report results
         eprintln!(
@@ -451,7 +457,11 @@ pub fn diff<P: AsRef<Path>>(
         return Ok(());
     } else {
         // Try to load as index file first
-        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&second) {
+        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&second, &None).await {
+            if second_minimizers.is_none() {
+                return Err(anyhow::anyhow!("Failed to load second index file"));
+            }
+            let second_minimizers = second_minimizers.unwrap();
             // Second file is an index file
             eprintln!(
                 "Second index: loaded {} minimizers",
@@ -486,7 +496,7 @@ pub fn diff<P: AsRef<Path>>(
             let before_count = first_minimizers.len();
 
             let (_seq_count, _total_bp) =
-                stream_diff_fastx(&second, k, w, &header, &mut first_minimizers)?;
+                stream_diff_fastx(&second.unwrap(), k, w, &header, &mut first_minimizers)?;
 
             // Report results
             eprintln!(
@@ -529,12 +539,15 @@ pub fn diff<P: AsRef<Path>>(
 }
 
 /// Show info about an index
-pub fn info<P: AsRef<Path>>(index_path: P) -> Result<()> {
+pub async fn info<P: AsRef<Path>>(index_path: P) -> Result<()> {
     let start_time = Instant::now();
 
     // Load index file
-    let (minimizers, header) = load_minimizer_hashes(&index_path)?;
-
+    let (minimizers, header) = load_minimizer_hashes(&Some(index_path), &None).await?;
+    if minimizers.is_none() {
+        return Err(anyhow::anyhow!("Failed to load index file"));
+    }
+    let minimizers = minimizers.unwrap();
     // Show index info
     eprintln!("Index information:");
     eprintln!("  Format version: {}", header.format_version);
@@ -549,7 +562,7 @@ pub fn info<P: AsRef<Path>>(index_path: P) -> Result<()> {
 }
 
 /// Combine minimizer indexes (set union)
-pub fn union<P: AsRef<Path>>(inputs: &[P], output: Option<&PathBuf>) -> Result<()> {
+pub async fn union<P: AsRef<Path>>(inputs: &[P], output: Option<&PathBuf>) -> Result<()> {
     let start_time = Instant::now();
     // Check input files
     if inputs.is_empty() {
@@ -604,8 +617,12 @@ pub fn union<P: AsRef<Path>>(inputs: &[P], output: Option<&PathBuf>) -> Result<(
 
     // Now load and merge all indexes
     for (i, path) in inputs.iter().enumerate() {
-        let (minimizers, _) = load_minimizer_hashes(path)?;
+        let (minimizers, _) = load_minimizer_hashes(&Some(path), &None).await?;
         let before_count = all_minimizers.len();
+        if minimizers.is_none() {
+            return Err(anyhow::anyhow!("Failed to load index file {:?}", path.as_ref()));
+        }
+        let minimizers = minimizers.unwrap();
 
         // Merge minimizers (set union)
         all_minimizers.extend(minimizers);

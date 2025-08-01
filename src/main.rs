@@ -237,10 +237,10 @@ async fn main() -> Result<()> {
                 .context("Failed to run index build command")?;
             }
             IndexCommands::Info { index } => {
-                index_info(index).context("Failed to run index info command")?;
+                index_info(index).await.context("Failed to run index info command")?;
             }
             IndexCommands::Union { inputs, output } => {
-                union_index(inputs, output.as_ref())
+                union_index(inputs, output.as_ref()).await
                     .context("Failed to run index union command")?;
             }
             IndexCommands::Diff {
@@ -250,7 +250,7 @@ async fn main() -> Result<()> {
                 window_size,
                 output,
             } => {
-                diff_index(first, second, *kmer_length, *window_size, output.as_ref())
+                diff_index(first, second, *kmer_length, *window_size, output.as_ref()).await
                     .context("Failed to run index diff command")?;
             }
         },
@@ -276,7 +276,7 @@ async fn main() -> Result<()> {
             }
 
             run_filter(
-                minimizers,
+                Some(minimizers),
                 &input,
                 input2.as_deref(),
                 output,
@@ -289,13 +289,13 @@ async fn main() -> Result<()> {
                 *threads,
                 *compression_level,
                 None,
-            )
+            ).await
             .context("Failed to run filter command")?;
         },
         #[cfg(feature = "server")]
         Commands::Server { index, port } => {
             println!("Loading server!");
-            let server = deacon::server::run_server(index.clone(), *port).await;
+            deacon::server::run_server(index.clone(), *port).await;
         },
         #[cfg(feature = "server")]
         Commands::Client {
@@ -312,22 +312,30 @@ async fn main() -> Result<()> {
             threads,
             compression_level,
         } => {
-            // deacon::client::run_client(
-            //     server_address,
-            //     input,
-            //     input2.as_deref(),
-            //     output,
-            //     output2.as_deref(),
-            //     match_threshold,
-            //     *prefix_length,
-            //     summary.as_ref(),
-            //     *deplete,
-            //     *rename,
-            //     *threads,
-            //     *compression_level
-            // )
-            // .context("Failed to run client command")?;
-            println!("Loading client!");
+            // Validate output2 usage
+
+            if output2.is_some() && input2.is_none() {
+                eprintln!(
+                    "Warning: --output2 specified but no second input file provided. --output2 will be ignored."
+                );
+            }
+            let dummy_index: Option<PathBuf> = None;
+            run_filter(
+                dummy_index,
+                &input,
+                input2.as_deref(),
+                output,
+                output2.as_deref(),
+                match_threshold,
+                *prefix_length,
+                summary.as_ref(),
+                *deplete,
+                *rename,
+                *threads,
+                *compression_level,
+                Some(server_address.to_string()),
+            ).await
+            .context("Failed to run filter command")?;
         },
     }
 
