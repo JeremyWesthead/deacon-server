@@ -20,9 +20,9 @@ use std::time::Instant;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 #[cfg(feature = "server")]
-use reqwest::Client;
-#[cfg(feature = "server")]
 use crate::server_common::{FilterRequest, FilterResponse};
+#[cfg(feature = "server")]
+use reqwest::Client;
 
 const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 
@@ -259,13 +259,13 @@ pub struct FilterSummary {
 pub fn input_matches_index(
     index_minimizers: &FxHashSet<u64>,
     input_minimizers: &Vec<u64>,
-    match_threshold: &MatchThreshold
+    match_threshold: &MatchThreshold,
 ) -> bool {
     // Count distinct minimizer hits
     let mut seen_hits = FxHashSet::default();
     let mut hit_count = 0;
     for &hash in input_minimizers {
-        if index_minimizers.contains(&hash) && seen_hits.insert(hash){
+        if index_minimizers.contains(&hash) && seen_hits.insert(hash) {
             hit_count += 1;
         }
     }
@@ -286,7 +286,7 @@ pub fn input_matches_index(
     hit_count >= required_hits
 }
 
-/// Send minimizers to server for checking against index. 
+/// Send minimizers to server for checking against index.
 /// Equivalent functionality to `input_matches_index, but remote
 #[cfg(feature = "server")]
 async fn send_minimizers_to_server(
@@ -296,20 +296,25 @@ async fn send_minimizers_to_server(
 ) -> Result<bool> {
     // Create a client to send the minimizers to the server
     let client = Client::new();
-    
+
     // Send the minimizers as a POST request
-    let response = client.post(server_address.to_owned() + "/is_index_match")
-        .json(&FilterRequest{
+    let response = client
+        .post(server_address.to_owned() + "/is_index_match")
+        .json(&FilterRequest {
             input: input_minimizers,
             match_threshold: *matches_threshold,
         })
-        .send().await?;
+        .send()
+        .await?;
 
     // Check if the response indicates a match
     if response.status().is_success() {
         Ok(response.json::<FilterResponse>().await?.index_match)
     } else {
-        Err(anyhow::anyhow!("Server returned an error: {}", response.status()))
+        Err(anyhow::anyhow!(
+            "Server returned an error: {}",
+            response.status()
+        ))
     }
 }
 
@@ -330,10 +335,15 @@ pub async fn check_input_matches_index(
                 panic!("Server address is required when using the server feature.");
             }
             let server_address = server_address.as_ref().map(String::as_str).unwrap();
-            return send_minimizers_to_server(input_minimizers.to_vec(), server_address, match_threshold).await
-                .unwrap_or_else(|e| {
-                    panic!("Error checking input against index: {}", e);
-                });
+            return send_minimizers_to_server(
+                input_minimizers.to_vec(),
+                server_address,
+                match_threshold,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!("Error checking input against index: {}", e);
+            });
         }
         #[cfg(not(feature = "server"))]
         {
@@ -401,8 +411,8 @@ pub async fn run<P: AsRef<Path>>(
     );
 
     // Load minimizers hashes and parse header
-    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path, &server_address).await?;
-
+    let (minimizer_hashes, header) =
+        load_minimizer_hashes(&minimizers_path, &server_address).await?;
 
     let kmer_length = header.kmer_length();
     let window_size = header.window_size();
@@ -462,7 +472,8 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        ).await?;
+        )
+        .await?;
     } else if let Some(input2_path) = input2_path {
         process_paired_seqs(
             &minimizer_hashes,
@@ -485,7 +496,8 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        ).await?;
+        )
+        .await?;
     } else {
         process_single_seqs(
             &minimizer_hashes,
@@ -506,7 +518,8 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        ).await?;
+        )
+        .await?;
     }
 
     writer.flush_all()?;
@@ -617,7 +630,16 @@ pub async fn run<P: AsRef<Path>>(
     Ok(())
 }
 
-async fn record_match(record_data: &RecordData, kmer_length: usize, prefix_length: usize, window_size: usize, minimizer_hashes: &Option<FxHashSet<u64>>, match_threshold: &MatchThreshold, server_address: &Option<String>, deplete: bool) -> (bool, usize){
+async fn record_match(
+    record_data: &RecordData,
+    kmer_length: usize,
+    prefix_length: usize,
+    window_size: usize,
+    minimizer_hashes: &Option<FxHashSet<u64>>,
+    match_threshold: &MatchThreshold,
+    server_address: &Option<String>,
+    deplete: bool,
+) -> (bool, usize) {
     let seq_len = record_data.seq.len();
 
     // Pre-allocate buffers for reuse
@@ -639,7 +661,7 @@ async fn record_match(record_data: &RecordData, kmer_length: usize, prefix_lengt
             &mut minimizer_buffer,
         );
     }
-    
+
     // check_input_matches_index returns true if the matches >= match_threshold
     // If deplete is true, we want to suppress output of sequences that match
     // The NOT is required due to the logic compared to requirement
@@ -647,7 +669,14 @@ async fn record_match(record_data: &RecordData, kmer_length: usize, prefix_lengt
     // !matches_index && deplete = false --> true
     // matches_index && !deplete = false --> true
     // !matches_index && !deplete = true --> false
-    let should_output = !(check_input_matches_index(minimizer_hashes, &minimizer_buffer, match_threshold, server_address).await && deplete);
+    let should_output = !(check_input_matches_index(
+        minimizer_hashes,
+        &minimizer_buffer,
+        match_threshold,
+        server_address,
+    )
+    .await
+        && deplete);
 
     (should_output, seq_len)
 }
@@ -717,7 +746,18 @@ async fn process_single_seqs(
         // Process batch in parallel
         let batch_results: Vec<_> = batch
             .par_iter()
-            .map(|record_data| record_match(record_data, kmer_length, prefix_length, window_size, minimizer_hashes, match_threshold, server_address, deplete))
+            .map(|record_data| {
+                record_match(
+                    record_data,
+                    kmer_length,
+                    prefix_length,
+                    window_size,
+                    minimizer_hashes,
+                    match_threshold,
+                    server_address,
+                    deplete,
+                )
+            })
             .collect();
 
         // Process results sequentially to maintain order
@@ -936,7 +976,14 @@ async fn process_paired_seqs(
                 // !matches_index && deplete = false --> true
                 // matches_index && !deplete = false --> true
                 // !matches_index && !deplete = true --> false
-                let should_output = !(check_input_matches_index(minimizer_hashes, &minimizer_buffer1, match_threshold, server_address).await && deplete);
+                let should_output = !(check_input_matches_index(
+                    minimizer_hashes,
+                    &minimizer_buffer1,
+                    match_threshold,
+                    server_address,
+                )
+                .await
+                    && deplete);
 
                 (should_output, seq1_len, seq2_len)
             })
@@ -1202,7 +1249,14 @@ async fn process_interleaved_paired_seqs(
                     // !matches_index && deplete = false --> true
                     // matches_index && !deplete = false --> true
                     // !matches_index && !deplete = true --> false
-                    let should_output = !(check_input_matches_index(minimizer_hashes, &minimizer_buffer1, match_threshold, server_address).await && deplete);
+                    let should_output = !(check_input_matches_index(
+                        minimizer_hashes,
+                        &minimizer_buffer1,
+                        match_threshold,
+                        server_address,
+                    )
+                    .await
+                        && deplete);
 
                     (should_output, record1_seq.len(), record2_seq.len())
                 },

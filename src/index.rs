@@ -78,7 +78,10 @@ pub fn load_header_and_count<P: AsRef<Path>>(path: &P) -> Result<(IndexHeader, u
 }
 
 /// Load the hashes without spiking memory usage with an extra vec
-pub async fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, server_address_option: &Option<String>) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
+pub async fn load_minimizer_hashes<P: AsRef<Path>>(
+    path_option: &Option<P>,
+    server_address_option: &Option<String>,
+) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
     if let Some(path) = path_option {
         let file =
             File::open(path).context(format!("Failed to open index file {:?}", path.as_ref()))?;
@@ -111,12 +114,16 @@ pub async fn load_minimizer_hashes<P: AsRef<Path>>(path_option: &Option<P>, serv
             if let Some(server) = server_address_option {
                 return Ok((None, get_sever_index_header(&server.to_string()).await?));
             } else {
-                return Err(anyhow::anyhow!("No server address provided for running in server mode"));
+                return Err(anyhow::anyhow!(
+                    "No server address provided for running in server mode"
+                ));
             }
         }
         #[cfg(not(feature = "server"))]
         {
-            return Err(anyhow::anyhow!("Server feature is not enabled. Cannot run without an index."));
+            return Err(anyhow::anyhow!(
+                "Server feature is not enabled. Cannot run without an index."
+            ));
         }
     }
 }
@@ -457,7 +464,8 @@ pub async fn diff<P: AsRef<Path>>(
         return Ok(());
     } else {
         // Try to load as index file first
-        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&second, &None).await {
+        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&second, &None).await
+        {
             if second_minimizers.is_none() {
                 return Err(anyhow::anyhow!("Failed to load second index file"));
             }
@@ -620,7 +628,10 @@ pub async fn union<P: AsRef<Path>>(inputs: &[P], output: Option<&PathBuf>) -> Re
         let (minimizers, _) = load_minimizer_hashes(&Some(path), &None).await?;
         let before_count = all_minimizers.len();
         if minimizers.is_none() {
-            return Err(anyhow::anyhow!("Failed to load index file {:?}", path.as_ref()));
+            return Err(anyhow::anyhow!(
+                "Failed to load index file {:?}",
+                path.as_ref()
+            ));
         }
         let minimizers = minimizers.unwrap();
 

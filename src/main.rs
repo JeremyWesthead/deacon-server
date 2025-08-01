@@ -129,7 +129,6 @@ enum Commands {
         #[arg(long = "compression-level", default_value_t = 2)]
         compression_level: u8,
     },
-
 }
 
 #[derive(Subcommand)]
@@ -237,10 +236,13 @@ async fn main() -> Result<()> {
                 .context("Failed to run index build command")?;
             }
             IndexCommands::Info { index } => {
-                index_info(index).await.context("Failed to run index info command")?;
+                index_info(index)
+                    .await
+                    .context("Failed to run index info command")?;
             }
             IndexCommands::Union { inputs, output } => {
-                union_index(inputs, output.as_ref()).await
+                union_index(inputs, output.as_ref())
+                    .await
                     .context("Failed to run index union command")?;
             }
             IndexCommands::Diff {
@@ -250,7 +252,8 @@ async fn main() -> Result<()> {
                 window_size,
                 output,
             } => {
-                diff_index(first, second, *kmer_length, *window_size, output.as_ref()).await
+                diff_index(first, second, *kmer_length, *window_size, output.as_ref())
+                    .await
                     .context("Failed to run index diff command")?;
             }
         },
@@ -289,14 +292,15 @@ async fn main() -> Result<()> {
                 *threads,
                 *compression_level,
                 None,
-            ).await
+            )
+            .await
             .context("Failed to run filter command")?;
-        },
+        }
         #[cfg(feature = "server")]
         Commands::Server { index, port } => {
             println!("Loading server!");
             deacon::server::run_server(index.clone(), *port).await;
-        },
+        }
         #[cfg(feature = "server")]
         Commands::Client {
             server_address,
@@ -334,9 +338,10 @@ async fn main() -> Result<()> {
                 *threads,
                 *compression_level,
                 Some(server_address.to_string()),
-            ).await
+            )
+            .await
             .context("Failed to run filter command")?;
-        },
+        }
     }
 
     Ok(())

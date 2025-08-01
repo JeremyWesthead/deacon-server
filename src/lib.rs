@@ -195,8 +195,9 @@ impl FilterConfig {
             self.rename,
             self.threads,
             self.compression_level,
-            None
-        ).await
+            None,
+        )
+        .await
     }
 }
 
@@ -276,7 +277,9 @@ impl IndexConfig {
     }
 }
 
-pub async fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
+pub async fn load_minimizers<P: AsRef<Path>>(
+    path: P,
+) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
     index::load_minimizer_hashes(&Some(path), &None).await
 }
 
