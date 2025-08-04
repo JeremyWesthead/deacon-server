@@ -435,7 +435,7 @@ pub async fn diff<P: AsRef<Path>>(
     let second = Some(second);
 
     // Load first file (always an index)
-    let (mut first_minimizers, header) = load_minimizer_hashes(&first, &None).await?;
+    let (first_minimizers, header) = load_minimizer_hashes(&first, &None).await?;
     if first_minimizers.is_none() {
         return Err(anyhow::anyhow!("Failed to load first index file"));
     }

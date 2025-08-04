@@ -35,7 +35,8 @@ liblzma = "0.3.1"
 tokio = { version = "1.47.0", features = ["full"] }
 axum = { version = "0.8.4", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "registry", "json"], optional = true }
-reqwest = { version = "0.12.22", features = ["blocking", "json"], optional = true }
+reqwest = { version = "0.12.22", features = ["json"], optional = true }
+itertools = "0.14.0"
 
 [dev-dependencies]
 assert_cmd = "2.0"
