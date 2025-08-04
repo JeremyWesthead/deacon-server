@@ -7,8 +7,8 @@ use crate::index::{IndexHeader, load_minimizer_hashes};
 use crate::server_common::{FilterRequest, FilterResponse};
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
-    extract::{DefaultBodyLimit},
 };
 use rustc_hash::FxHashSet;
 

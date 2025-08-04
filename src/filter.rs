@@ -2,15 +2,20 @@
 use crate::MatchThreshold;
 use crate::index::load_minimizer_hashes;
 use crate::minimizers::fill_minimizer_hashes;
+#[cfg(feature = "server")]
+use crate::server_common::{FilterRequest, FilterResponse};
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use itertools::Itertools;
 use liblzma::write::XzEncoder;
 use needletail::parse_fastx_file;
 use needletail::parse_fastx_stdin;
 use needletail::parser::Format;
 use rayon::prelude::*;
+#[cfg(feature = "server")]
+use reqwest::Client;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -18,11 +23,6 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use zstd::stream::write::Encoder as ZstdEncoder;
-use itertools::Itertools;
-#[cfg(feature = "server")]
-use crate::server_common::{FilterRequest, FilterResponse};
-#[cfg(feature = "server")]
-use reqwest::Client;
 
 const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 
@@ -295,9 +295,7 @@ pub fn inputs_match_index(
 ) -> Vec<bool> {
     input_minimizers
         .par_iter()
-        .map(|minimizers| {
-            input_matches_index(index_minimizers, minimizers, match_threshold)
-        })
+        .map(|minimizers| input_matches_index(index_minimizers, minimizers, match_threshold))
         .collect()
 }
 
@@ -683,18 +681,10 @@ fn get_hashes_from_record_pair(
     prefix_length: usize,
     window_size: usize,
 ) -> (Vec<u64>, usize, usize) {
-    let (mut minimizer_buffer1, seq1_len) = get_hashes_from_record(
-        record_data1,
-        kmer_length,
-        prefix_length,
-        window_size,
-    );
-    let (mut minimizer_buffer2, seq2_len) = get_hashes_from_record(
-        record_data2,
-        kmer_length,
-        prefix_length,
-        window_size,
-    );
+    let (mut minimizer_buffer1, seq1_len) =
+        get_hashes_from_record(record_data1, kmer_length, prefix_length, window_size);
+    let (mut minimizer_buffer2, seq2_len) =
+        get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
     // Combine the two minimizer buffers
     minimizer_buffer1.append(&mut minimizer_buffer2);
 
@@ -764,16 +754,13 @@ async fn process_single_seqs(
         }
 
         // Get batch minimizers in parallel
-        let (batch_minimizers, seq_lens): (Vec<Vec<u64>>, Vec<usize>) = batch.par_iter()
+        let (batch_minimizers, seq_lens): (Vec<Vec<u64>>, Vec<usize>) = batch
+            .par_iter()
             .map(|record_data| {
-                get_hashes_from_record(
-                    &record_data,
-                    kmer_length,
-                    prefix_length,
-                    window_size,
-                )
-            }).unzip();
-        
+                get_hashes_from_record(&record_data, kmer_length, prefix_length, window_size)
+            })
+            .unzip();
+
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
         let batch_matches = check_inputs_match_index(
@@ -781,9 +768,8 @@ async fn process_single_seqs(
             &batch_minimizers,
             match_threshold,
             server_address,
-        ).await;
-        
-        
+        )
+        .await;
 
         // Process results sequentially to maintain order
         for (i, (seq_len, seq_match)) in seq_lens.iter().zip(batch_matches).enumerate() {
@@ -942,22 +928,23 @@ async fn process_paired_seqs(
         let batch_result: Vec<(Vec<u64>, usize, usize)> = batch1
             .par_iter()
             .zip(batch2.par_iter())
-            .map(|(record_data1, record_data2)| 
+            .map(|(record_data1, record_data2)| {
                 get_hashes_from_record_pair(
                     record_data1,
                     record_data2,
                     kmer_length,
                     prefix_length,
                     window_size,
-                ))
+                )
+            })
             .collect();
 
-        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) = batch_result
-            .into_iter()
-            .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
-            .multiunzip();
+        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
+            batch_result
+                .into_iter()
+                .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
+                .multiunzip();
 
-        
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
         let batch_matches = check_inputs_match_index(
@@ -965,10 +952,16 @@ async fn process_paired_seqs(
             &batch_minimizers,
             match_threshold,
             server_address,
-        ).await;
+        )
+        .await;
 
         // Process results sequentially to maintain order
-        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches.iter().zip(seq_lens1).zip(seq_lens2).enumerate() {
+        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches
+            .iter()
+            .zip(seq_lens1)
+            .zip(seq_lens2)
+            .enumerate()
+        {
             let record_data1 = &batch1[i];
             let record_data2 = &batch2[i];
             let should_output = !(*seq_match && deplete);
@@ -1158,13 +1151,13 @@ async fn process_interleaved_paired_seqs(
 
             // Store the pair in the batch
             batch_pairs.push((
-                RecordData{
+                RecordData {
                     id: record1_id,
                     seq: record1_seq,
                     qual: record1_qual,
                     format: record1_format,
                 },
-                RecordData{
+                RecordData {
                     id: record2_id,
                     seq: record2_seq,
                     qual: record2_qual,
@@ -1180,22 +1173,23 @@ async fn process_interleaved_paired_seqs(
         // Get batch minimizers in parallel
         let batch_result: Vec<(Vec<u64>, usize, usize)> = batch_pairs
             .par_iter()
-            .map(|(record_data1, record_data2)| 
+            .map(|(record_data1, record_data2)| {
                 get_hashes_from_record_pair(
                     record_data1,
                     record_data2,
                     kmer_length,
                     prefix_length,
                     window_size,
-                ))
+                )
+            })
             .collect();
 
-        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) = batch_result
-            .into_iter()
-            .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
-            .multiunzip();
+        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
+            batch_result
+                .into_iter()
+                .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
+                .multiunzip();
 
-        
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
         let batch_matches = check_inputs_match_index(
@@ -1203,14 +1197,19 @@ async fn process_interleaved_paired_seqs(
             &batch_minimizers,
             match_threshold,
             server_address,
-        ).await;
+        )
+        .await;
 
         // Process results sequentially to maintain order
-        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches.iter().zip(seq_lens1).zip(seq_lens2).enumerate() {
-        // for (i, result) in batch_results.into_iter().enumerate() {
+        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches
+            .iter()
+            .zip(seq_lens1)
+            .zip(seq_lens2)
+            .enumerate()
+        {
+            // for (i, result) in batch_results.into_iter().enumerate() {
             let (record1, record2) = &batch_pairs[i];
             let should_output = !(*seq_match && deplete);
-
 
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
