@@ -69,7 +69,6 @@ enum Commands {
         compression_level: u8,
     },
 
-    #[cfg(feature = "server")]
     Server {
         /// Path to minimizer index file
         index: PathBuf,
@@ -80,8 +79,8 @@ enum Commands {
     },
 
     /// Alternate version of Filter, swapping local compute for passing to a server
-    /// which has the index pre-loaded
-    #[cfg(feature = "server")]
+    /// which has the index pre-loaded. Will inevitably be slower than local filtering,
+    /// but saves on index loading. Better used for cases of small input + large index
     Client {
         /// Server address to connect to (including port)
         server_address: String,
@@ -196,8 +195,7 @@ enum IndexCommands {
         output: Option<PathBuf>,
     },
 }
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Check we have either AVX2 or NEON
     #[cfg(not(any(target_feature = "avx2", target_feature = "neon")))]
     {
@@ -236,13 +234,10 @@ async fn main() -> Result<()> {
                 .context("Failed to run index build command")?;
             }
             IndexCommands::Info { index } => {
-                index_info(index)
-                    .await
-                    .context("Failed to run index info command")?;
+                index_info(index).context("Failed to run index info command")?;
             }
             IndexCommands::Union { inputs, output } => {
                 union_index(inputs, output.as_ref())
-                    .await
                     .context("Failed to run index union command")?;
             }
             IndexCommands::Diff {
@@ -253,7 +248,6 @@ async fn main() -> Result<()> {
                 output,
             } => {
                 diff_index(first, second, *kmer_length, *window_size, output.as_ref())
-                    .await
                     .context("Failed to run index diff command")?;
             }
         },
@@ -293,15 +287,28 @@ async fn main() -> Result<()> {
                 *compression_level,
                 None,
             )
-            .await
             .context("Failed to run filter command")?;
         }
-        #[cfg(feature = "server")]
         Commands::Server { index, port } => {
-            println!("Loading server!");
-            deacon::server::run_server(index.clone(), *port).await;
+            #[cfg(feature = "server")]
+            {
+                // Server needs to run async, so spawn an async runtime to run it
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    eprintln!("Loading server!");
+                    deacon::server::run_server(index.clone(), *port).await;
+                });
+            }
+            #[cfg(not(feature = "server"))]
+            {
+                eprintln!(
+                    "Server functionality is not enabled in this build. Please compile with the 'server' feature: `cargo build --features server`"
+                );
+                // Suppress dead code warning so this compiles without issue when server is not enabled
+                let _ = (index, port);
+                std::process::exit(1);
+            }
         }
-        #[cfg(feature = "server")]
         Commands::Client {
             server_address,
             input,
@@ -316,31 +323,54 @@ async fn main() -> Result<()> {
             threads,
             compression_level,
         } => {
-            // Validate output2 usage
-
-            if output2.is_some() && input2.is_none() {
-                eprintln!(
-                    "Warning: --output2 specified but no second input file provided. --output2 will be ignored."
-                );
+            #[cfg(feature = "server")]
+            {
+                // Validate output2 usage
+                if output2.is_some() && input2.is_none() {
+                    eprintln!(
+                        "Warning: --output2 specified but no second input file provided. --output2 will be ignored."
+                    );
+                }
+                let dummy_index: Option<&PathBuf> = None;
+                run_filter(
+                    dummy_index,
+                    input,
+                    input2.as_deref(),
+                    output,
+                    output2.as_deref(),
+                    match_threshold,
+                    *prefix_length,
+                    summary.as_ref(),
+                    *deplete,
+                    *rename,
+                    *threads,
+                    *compression_level,
+                    Some(server_address.to_string()),
+                )
+                .context("Failed to run filter with client functionality")?;
             }
-            let dummy_index: Option<PathBuf> = None;
-            run_filter(
-                dummy_index,
-                input,
-                input2.as_deref(),
-                output,
-                output2.as_deref(),
-                match_threshold,
-                *prefix_length,
-                summary.as_ref(),
-                *deplete,
-                *rename,
-                *threads,
-                *compression_level,
-                Some(server_address.to_string()),
-            )
-            .await
-            .context("Failed to run filter command")?;
+            #[cfg(not(feature = "server"))]
+            {
+                eprintln!(
+                    "Client functionality is not enabled in this build. Please compile with the 'server' feature: `cargo build --features server`"
+                );
+                // Suppress dead code warning so this compiles without issue when server is not enabled
+                let _ = (
+                    server_address,
+                    input,
+                    input2,
+                    output,
+                    output2,
+                    match_threshold,
+                    prefix_length,
+                    summary,
+                    deplete,
+                    rename,
+                    threads,
+                    compression_level,
+                );
+                std::process::exit(1);
+            }
         }
     }
 

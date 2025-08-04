@@ -252,9 +252,7 @@ fn test_index_diff_three_methods() {
                 }
             }
         }
-        panic!(
-            "Could not extract remaining minimizer count from stderr: {stderr_str}"
-        );
+        panic!("Could not extract remaining minimizer count from stderr: {stderr_str}");
     }
 
     let remaining1 = extract_remaining_count(&output1.stderr);

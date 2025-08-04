@@ -14,6 +14,7 @@ pub mod minimizers;
 
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "server")]
 pub mod server_common;
 
 // Re-export the important structures and functions for library users
@@ -44,9 +45,7 @@ impl FromStr for MatchThreshold {
             Ok(MatchThreshold::Absolute(val))
         } else if let Ok(val) = s.parse::<f64>() {
             if val.is_nan() || val.is_sign_negative() || val > 1.0 {
-                Err(format!(
-                    "Relative threshold must be in [0, 1], got: {val}"
-                ))
+                Err(format!("Relative threshold must be in [0, 1], got: {val}"))
             } else {
                 Ok(MatchThreshold::Relative(val))
             }
@@ -179,7 +178,7 @@ impl FilterConfig {
     }
 
     /// Filter with this configuration
-    pub async fn execute(&self) -> Result<()> {
+    pub fn execute(&self) -> Result<()> {
         filter::run(
             Some(&self.minimizers_path),
             &self.input_path,
@@ -195,7 +194,6 @@ impl FilterConfig {
             self.compression_level,
             None,
         )
-        .await
     }
 }
 
@@ -275,10 +273,8 @@ impl IndexConfig {
     }
 }
 
-pub async fn load_minimizers<P: AsRef<Path>>(
-    path: P,
-) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
-    index::load_minimizer_hashes(&Some(path), &None).await
+pub fn load_minimizers(path: &PathBuf) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
+    index::load_minimizer_hashes(&Some(path), &None)
 }
 
 pub fn write_minimizers(

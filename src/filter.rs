@@ -1,4 +1,3 @@
-#[cfg(feature = "server")]
 use crate::MatchThreshold;
 use crate::index::load_minimizer_hashes;
 use crate::minimizers::fill_minimizer_hashes;
@@ -15,12 +14,12 @@ use needletail::parse_fastx_stdin;
 use needletail::parser::Format;
 use rayon::prelude::*;
 #[cfg(feature = "server")]
-use reqwest::Client;
+use reqwest::blocking::Client;
 use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
@@ -255,11 +254,12 @@ pub struct FilterSummary {
     bp_per_second: u64,
 }
 
-/// Determine if a given set of minimizers matches the index
-pub fn input_matches_index(
+/// Determine if a given set of minimizers should be output
+pub fn input_should_be_output(
     index_minimizers: &FxHashSet<u64>,
     input_minimizers: &Vec<u64>,
     match_threshold: &MatchThreshold,
+    deplete: bool,
 ) -> bool {
     // Count distinct minimizer hits
     let mut seen_hits = FxHashSet::default();
@@ -282,47 +282,58 @@ pub fn input_matches_index(
         }
     };
 
-    // The input minimizers match the index if it has enough hits
-    hit_count >= required_hits
+    
+
+    if deplete {
+        // Deplete mode: remove pairs that meet the threshold
+        hit_count < required_hits
+    } else {
+        // Default mode: keep pairs that meet the threshold
+        hit_count >= required_hits
+    }
 }
 
 /// Given a set of index minimizers and a vector of input minimizers,
 /// return a vector of booleans indicating whether each input matches the index
-pub fn inputs_match_index(
+pub fn inputs_should_be_output(
     index_minimizers: &FxHashSet<u64>,
     input_minimizers: &Vec<Vec<u64>>,
     match_threshold: &MatchThreshold,
+    deplete: bool,
 ) -> Vec<bool> {
     input_minimizers
         .par_iter()
-        .map(|minimizers| input_matches_index(index_minimizers, minimizers, match_threshold))
+        .map(|minimizers| {
+            input_should_be_output(index_minimizers, minimizers, match_threshold, deplete)
+        })
         .collect()
 }
 
 /// Send minimizers to server for checking against index.
-/// Equivalent functionality to `inputs_match_index, but remote
+/// Equivalent functionality to `inputs_should_be_output, but remote
 #[cfg(feature = "server")]
-async fn send_all_minimizers_to_server(
+fn send_all_minimizers_to_server(
     input_minimizers: Vec<Vec<u64>>,
     server_address: &str,
     matches_threshold: &MatchThreshold,
+    deplete: bool,
 ) -> Result<Vec<bool>> {
     // Create a client to send the minimizers to the server
     let client = Client::new();
 
     // Send the minimizers as a POST request
     let response = client
-        .post(server_address.to_owned() + "/is_index_match")
+        .post(server_address.to_owned() + "/should_output")
         .json(&FilterRequest {
             input: input_minimizers,
             match_threshold: *matches_threshold,
+            deplete,
         })
-        .send()
-        .await?;
+        .send()?;
 
     // Check if the response indicates a match
     if response.status().is_success() {
-        Ok(response.json::<FilterResponse>().await?.index_match)
+        Ok(response.json::<FilterResponse>()?.should_output)
     } else {
         Err(anyhow::anyhow!(
             "Server returned an error: {}",
@@ -331,32 +342,33 @@ async fn send_all_minimizers_to_server(
     }
 }
 
-pub async fn check_inputs_match_index(
+pub fn check_inputs_should_be_output(
     index_minimizers: &Option<FxHashSet<u64>>,
     input_minimizers: &Vec<Vec<u64>>,
     match_threshold: &MatchThreshold,
-    server_address: &Option<String>,
+    _server_address: &Option<String>,
+    deplete: bool,
 ) -> Vec<bool> {
     // If index minimizers are provided, check if input matches locally
     if let Some(index_minimizers) = index_minimizers {
-        inputs_match_index(index_minimizers, input_minimizers, match_threshold)
+        inputs_should_be_output(index_minimizers, input_minimizers, match_threshold, deplete)
     } else {
         // Else, send the input minimizers to the server for checking
         #[cfg(feature = "server")]
         {
-            if server_address.is_none() {
+            if _server_address.is_none() {
                 panic!("Server address is required when using the server feature.");
             }
-            let server_address = server_address.as_ref().map(String::as_str).unwrap();
-            return send_all_minimizers_to_server(
+            let server_address = _server_address.as_ref().map(String::as_str).unwrap();
+            send_all_minimizers_to_server(
                 input_minimizers.to_vec(),
                 server_address,
                 match_threshold,
+                deplete,
             )
-            .await
             .unwrap_or_else(|e| {
                 panic!("Error checking input against index: {e}");
-            });
+            })
         }
         #[cfg(not(feature = "server"))]
         {
@@ -365,8 +377,8 @@ pub async fn check_inputs_match_index(
     }
 }
 #[allow(clippy::too_many_arguments)]
-pub async fn run<P: AsRef<Path>>(
-    minimizers_path: Option<P>,
+pub fn run(
+    minimizers_path: Option<&PathBuf>,
     input_path: &str,
     input2_path: Option<&str>,
     output_path: &str,
@@ -424,16 +436,13 @@ pub async fn run<P: AsRef<Path>>(
     );
 
     // Load minimizers hashes and parse header
-    let (minimizer_hashes, header) =
-        load_minimizer_hashes(&minimizers_path, &server_address).await?;
+    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path, &server_address)?;
 
     let kmer_length = header.kmer_length();
     let window_size = header.window_size();
 
     let load_time = start_time.elapsed();
-    eprintln!(
-        "Loaded index (k={kmer_length}, w={window_size}) in {load_time:.2?}"
-    );
+    eprintln!("Loaded index (k={kmer_length}, w={window_size}) in {load_time:.2?}");
 
     // Create the appropriate writer(s) based on the output path(s)
     let mut writer = get_writer(output_path, compression_level)?;
@@ -484,8 +493,7 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        )
-        .await?;
+        )?;
     } else if let Some(input2_path) = input2_path {
         process_paired_seqs(
             &minimizer_hashes,
@@ -508,8 +516,7 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        )
-        .await?;
+        )?;
     } else {
         process_single_seqs(
             &minimizer_hashes,
@@ -530,8 +537,7 @@ pub async fn run<P: AsRef<Path>>(
             &spinner,
             filtering_start_time,
             &server_address,
-        )
-        .await?;
+        )?;
     }
 
     writer.flush_all()?;
@@ -595,7 +601,7 @@ pub async fn run<P: AsRef<Path>>(
         let seqs_out = total_seqs - filtered_seqs;
 
         let index = match minimizers_path {
-            Some(path) => path.as_ref().to_string_lossy().to_string(),
+            Some(path) => path.to_string_lossy().to_string(),
             None => server_address.unwrap(),
         };
 
@@ -684,13 +690,15 @@ fn get_hashes_from_record_pair(
     let (mut minimizer_buffer2, seq2_len) =
         get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
     // Combine the two minimizer buffers
+    eprintln!("{} {}", minimizer_buffer1.len(), minimizer_buffer2.len());
     minimizer_buffer1.append(&mut minimizer_buffer2);
+    eprintln!("{} {}\n", minimizer_buffer1.len(), minimizer_buffer2.len());
 
     (minimizer_buffer1, seq1_len, seq2_len)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_single_seqs(
+fn process_single_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     input_path: &str,
     writer: &mut Box<dyn FastxWriter>,
@@ -762,18 +770,17 @@ async fn process_single_seqs(
 
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
-        let batch_matches = check_inputs_match_index(
+        let batch_should_outputs = check_inputs_should_be_output(
             minimizer_hashes,
             &batch_minimizers,
             match_threshold,
             server_address,
-        )
-        .await;
+            deplete,
+        );
 
         // Process results sequentially to maintain order
-        for (i, (seq_len, seq_match)) in seq_lens.iter().zip(batch_matches).enumerate() {
+        for (i, (seq_len, should_output)) in seq_lens.iter().zip(batch_should_outputs).enumerate() {
             let record_data = &batch[i];
-            let should_output = !(seq_match && deplete);
             *total_seqs += 1;
             *total_bp += *seq_len as u64;
 
@@ -849,7 +856,7 @@ async fn process_single_seqs(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_paired_seqs(
+fn process_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     input1_path: &str,
     input2_path: &str,
@@ -940,22 +947,20 @@ async fn process_paired_seqs(
             .collect();
 
         let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
-            batch_result
-                .into_iter()
-                .multiunzip();
+            batch_result.into_iter().multiunzip();
 
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
-        let batch_matches = check_inputs_match_index(
+        let batch_should_outputs = check_inputs_should_be_output(
             minimizer_hashes,
             &batch_minimizers,
             match_threshold,
             server_address,
-        )
-        .await;
+            deplete,
+        );
 
         // Process results sequentially to maintain order
-        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches
+        for (i, ((should_output, seq1_len), seq2_len)) in batch_should_outputs
             .iter()
             .zip(seq_lens1)
             .zip(seq_lens2)
@@ -963,12 +968,11 @@ async fn process_paired_seqs(
         {
             let record_data1 = &batch1[i];
             let record_data2 = &batch2[i];
-            let should_output = !(*seq_match && deplete);
 
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
 
-            if should_output {
+            if *should_output {
                 // Track output base pairs
                 *output_bp += (seq1_len + seq2_len) as u64;
 
@@ -1076,7 +1080,7 @@ async fn process_paired_seqs(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_interleaved_paired_seqs(
+fn process_interleaved_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     writer: &mut Box<dyn FastxWriter>,
     mut writer2: Option<&mut Box<dyn FastxWriter>>,
@@ -1185,22 +1189,20 @@ async fn process_interleaved_paired_seqs(
             .collect();
 
         let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
-            batch_result
-                .into_iter()
-                .multiunzip();
+            batch_result.into_iter().multiunzip();
 
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
-        let batch_matches = check_inputs_match_index(
+        let batch_should_outputs = check_inputs_should_be_output(
             minimizer_hashes,
             &batch_minimizers,
             match_threshold,
             server_address,
-        )
-        .await;
+            deplete,
+        );
 
         // Process results sequentially to maintain order
-        for (i, ((seq_match, seq1_len), seq2_len)) in batch_matches
+        for (i, ((should_output, seq1_len), seq2_len)) in batch_should_outputs
             .iter()
             .zip(seq_lens1)
             .zip(seq_lens2)
@@ -1208,12 +1210,11 @@ async fn process_interleaved_paired_seqs(
         {
             // for (i, result) in batch_results.into_iter().enumerate() {
             let (record1, record2) = &batch_pairs[i];
-            let should_output = !(*seq_match && deplete);
 
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
 
-            if should_output {
+            if *should_output {
                 // Track output base pairs
                 *output_bp += (seq1_len + seq2_len) as u64;
 
