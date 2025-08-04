@@ -49,7 +49,7 @@ async fn load_index(index_path: PathBuf) {
             INDEX_HEADER.get_or_init(|| header);
         }
         Err(e) => {
-            eprintln!("Failed to load index: {}", e);
+            eprintln!("Failed to load index: {e}");
             std::process::exit(1);
         }
     }
@@ -77,7 +77,7 @@ async fn index_header() -> Json<IndexHeader> {
 async fn is_index_match(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
     Json(FilterResponse {
         index_match: inputs_match_index(
-            &INDEX.get().expect("Index not loaded"),
+            INDEX.get().expect("Index not loaded"),
             &request.input,
             &request.match_threshold,
         ),

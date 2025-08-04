@@ -891,8 +891,7 @@ fn test_shared_minimizer_counted_once() {
     assert_eq!(
         seqs_out, 2,
         "Expected 2 sequences in output (both reads of the pair should be kept) \
-         but got {}. This indicates shared minimizers were double-counted.",
-        seqs_out
+         but got {seqs_out}. This indicates shared minimizers were double-counted."
     );
 }
 

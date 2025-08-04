@@ -45,16 +45,14 @@ impl FromStr for MatchThreshold {
         } else if let Ok(val) = s.parse::<f64>() {
             if val.is_nan() || val.is_sign_negative() || val > 1.0 {
                 Err(format!(
-                    "Relative threshold must be in [0, 1], got: {}",
-                    val
+                    "Relative threshold must be in [0, 1], got: {val}"
                 ))
             } else {
                 Ok(MatchThreshold::Relative(val))
             }
         } else {
             Err(format!(
-                "Invalid threshold format: '{}'. Expected an integer or a float between [0, 1]",
-                s
+                "Invalid threshold format: '{s}'. Expected an integer or a float between [0, 1]"
             ))
         }
     }
@@ -63,8 +61,8 @@ impl FromStr for MatchThreshold {
 impl std::fmt::Display for MatchThreshold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MatchThreshold::Absolute(n) => write!(f, "{}", n),
-            MatchThreshold::Relative(p) => write!(f, "{}", p),
+            MatchThreshold::Absolute(n) => write!(f, "{n}"),
+            MatchThreshold::Relative(p) => write!(f, "{p}"),
         }
     }
 }

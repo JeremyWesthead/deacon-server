@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
 
             run_filter(
                 Some(minimizers),
-                &input,
+                input,
                 input2.as_deref(),
                 output,
                 output2.as_deref(),
@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
             let dummy_index: Option<PathBuf> = None;
             run_filter(
                 dummy_index,
-                &input,
+                input,
                 input2.as_deref(),
                 output,
                 output2.as_deref(),

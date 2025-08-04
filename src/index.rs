@@ -114,9 +114,9 @@ pub async fn load_minimizer_hashes<P: AsRef<Path>>(
             if let Some(server) = server_address_option {
                 return Ok((None, get_sever_index_header(&server.to_string()).await?));
             } else {
-                return Err(anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     "No server address provided for running in server mode"
-                ));
+                ))
             }
         }
         #[cfg(not(feature = "server"))]
@@ -154,12 +154,12 @@ pub fn write_minimizers(
 
     // Serialise the count of minimizers first
     let count = minimizers.len();
-    encode_into_std_write(&count, &mut writer, bincode::config::standard())
+    encode_into_std_write(count, &mut writer, bincode::config::standard())
         .context("Failed to serialise minimizer count")?;
 
     // Serialise each minimizer directly
     for &hash in minimizers {
-        encode_into_std_write(&hash, &mut writer, bincode::config::standard())
+        encode_into_std_write(hash, &mut writer, bincode::config::standard())
             .context("Failed to serialise minimizer hash")?;
     }
     Ok(())
@@ -181,9 +181,9 @@ pub fn build<P: AsRef<Path>>(
 
     // Build options string similar to filter
     let mut options = Vec::<String>::new();
-    options.push(format!("capacity={}M", capacity_millions));
+    options.push(format!("capacity={capacity_millions}M"));
     if threads > 0 {
-        options.push(format!("threads={}", threads));
+        options.push(format!("threads={threads}"));
     }
 
     eprintln!(
@@ -218,7 +218,7 @@ pub fn build<P: AsRef<Path>>(
     let mut all_minimizers: FxHashSet<u64> =
         FxHashSet::with_capacity_and_hasher(capacity, Default::default());
 
-    eprintln!("Building index (k={}, w={})", kmer_length, window_size);
+    eprintln!("Building index (k={kmer_length}, w={window_size})");
 
     let mut seq_count = 0;
     let mut total_bp = 0;
@@ -297,7 +297,7 @@ pub fn build<P: AsRef<Path>>(
     write_minimizers(&all_minimizers, &header, output.as_ref())?;
 
     let total_time = start_time.elapsed();
-    eprintln!("Completed in {:.2?}", total_time);
+    eprintln!("Completed in {total_time:.2?}");
 
     Ok(())
 }
@@ -325,13 +325,11 @@ fn stream_diff_fastx<P: AsRef<Path>>(
 
     if path.to_string_lossy() == "-" {
         eprintln!(
-            "Second index: processing FASTX from stdin (k={}, w={})…",
-            kmer_length, window_size
+            "Second index: processing FASTX from stdin (k={kmer_length}, w={window_size})…"
         );
     } else {
         eprintln!(
-            "Second index: processing FASTX from file (k={}, w={})…",
-            kmer_length, window_size
+            "Second index: processing FASTX from file (k={kmer_length}, w={window_size})…"
         );
     }
 
@@ -401,8 +399,7 @@ fn stream_diff_fastx<P: AsRef<Path>>(
             let current_gb = total_bp / 1_000_000_000;
             if current_gb > last_reported_gb {
                 eprintln!(
-                    "  Processed {} sequences ({}bp), removed {} minimizers",
-                    seq_count, total_bp, removed_count
+                    "  Processed {seq_count} sequences ({total_bp}bp), removed {removed_count} minimizers"
                 );
                 last_reported_gb = current_gb;
             }
@@ -415,15 +412,14 @@ fn stream_diff_fastx<P: AsRef<Path>>(
     }
 
     eprintln!(
-        "Processed {} sequences ({}bp) from FASTX file",
-        seq_count, total_bp
+        "Processed {seq_count} sequences ({total_bp}bp) from FASTX file"
     );
 
     Ok((seq_count, total_bp))
 }
 
 /// Compute the set difference between two minimizer indexes (A - B)
-pub async fn diff<P: AsRef<Path>>(
+pub async fn diff<P: AsRef<Path> + Clone>(
     first: P,
     second: P,
     kmer_length: Option<usize>,
@@ -431,11 +427,9 @@ pub async fn diff<P: AsRef<Path>>(
     output: Option<&PathBuf>,
 ) -> Result<()> {
     let start_time = Instant::now();
-    let first = Some(first);
-    let second = Some(second);
 
     // Load first file (always an index)
-    let (first_minimizers, header) = load_minimizer_hashes(&first, &None).await?;
+    let (first_minimizers, header) = load_minimizer_hashes(&Some(first), &None).await?;
     if first_minimizers.is_none() {
         return Err(anyhow::anyhow!("Failed to load first index file"));
     }
@@ -447,7 +441,7 @@ pub async fn diff<P: AsRef<Path>>(
         // Second file is a FASTX file - stream diff with provided k, w
         let before_count = first_minimizers.len();
         let (_seq_count, _total_bp) =
-            stream_diff_fastx(&second.unwrap(), k, w, &header, &mut first_minimizers)?;
+            stream_diff_fastx(second, k, w, &header, &mut first_minimizers)?;
 
         // Report results
         eprintln!(
@@ -459,12 +453,12 @@ pub async fn diff<P: AsRef<Path>>(
         write_minimizers(&first_minimizers, &header, output)?;
 
         let total_time = start_time.elapsed();
-        eprintln!("Completed difference operation in {:.2?}", total_time);
+        eprintln!("Completed difference operation in {total_time:.2?}");
 
         return Ok(());
     } else {
         // Try to load as index file first
-        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&second, &None).await
+        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&Some(second.clone()), &None).await
         {
             if second_minimizers.is_none() {
                 return Err(anyhow::anyhow!("Failed to load second index file"));
@@ -504,7 +498,7 @@ pub async fn diff<P: AsRef<Path>>(
             let before_count = first_minimizers.len();
 
             let (_seq_count, _total_bp) =
-                stream_diff_fastx(&second.unwrap(), k, w, &header, &mut first_minimizers)?;
+                stream_diff_fastx(second, k, w, &header, &mut first_minimizers)?;
 
             // Report results
             eprintln!(
@@ -516,7 +510,7 @@ pub async fn diff<P: AsRef<Path>>(
             write_minimizers(&first_minimizers, &header, output)?;
 
             let total_time = start_time.elapsed();
-            eprintln!("Completed difference operation in {:.2?}", total_time);
+            eprintln!("Completed difference operation in {total_time:.2?}");
 
             return Ok(());
         }
@@ -541,7 +535,7 @@ pub async fn diff<P: AsRef<Path>>(
     write_minimizers(&first_minimizers, &header, output)?;
 
     let total_time = start_time.elapsed();
-    eprintln!("Completed diff operation in {:.2?}", total_time);
+    eprintln!("Completed diff operation in {total_time:.2?}");
 
     Ok(())
 }
@@ -564,7 +558,7 @@ pub async fn info<P: AsRef<Path>>(index_path: P) -> Result<()> {
     eprintln!("  Distinct minimizer count: {}", minimizers.len());
 
     let total_time = start_time.elapsed();
-    eprintln!("Retrieved index info in {:.2?}", total_time);
+    eprintln!("Retrieved index info in {total_time:.2?}");
 
     Ok(())
 }
@@ -648,7 +642,7 @@ pub async fn union<P: AsRef<Path>>(inputs: &[P], output: Option<&PathBuf>) -> Re
         );
     }
 
-    write_minimizers(&all_minimizers, &header, output)?;
+    write_minimizers(&all_minimizers, header, output)?;
 
     let total_time = start_time.elapsed();
     eprintln!(

@@ -65,7 +65,7 @@ impl CompressionFormat {
         match self {
             Self::None => Ok(()),
             Self::Gzip => {
-                if level < 1 || level > 9 {
+                if !(1..=9).contains(&level) {
                     Err(anyhow::anyhow!(
                         "Invalid gzip compression level {}. Must be between 1 and 9.",
                         level
@@ -75,7 +75,7 @@ impl CompressionFormat {
                 }
             }
             Self::Zstd => {
-                if level < 1 || level > 22 {
+                if !(1..=22).contains(&level) {
                     Err(anyhow::anyhow!(
                         "Invalid zstd compression level {}. Must be between 1 and 22.",
                         level
@@ -197,7 +197,7 @@ fn get_writer(output_path: &str, compression_level: u8) -> Result<Box<dyn FastxW
             .create(true)
             .truncate(true)
             .open(output_path)
-            .context(format!("Failed to create output file: {}", output_path))?;
+            .context(format!("Failed to create output file: {output_path}"))?;
 
         let buffered_file = BufWriter::with_capacity(OUTPUT_BUFFER_SIZE, file);
         let format = CompressionFormat::from_extension(output_path);
@@ -355,7 +355,7 @@ pub async fn check_inputs_match_index(
             )
             .await
             .unwrap_or_else(|e| {
-                panic!("Error checking input against index: {}", e);
+                panic!("Error checking input against index: {e}");
             });
         }
         #[cfg(not(feature = "server"))]
@@ -364,7 +364,7 @@ pub async fn check_inputs_match_index(
         }
     }
 }
-
+#[allow(clippy::too_many_arguments)]
 pub async fn run<P: AsRef<Path>>(
     minimizers_path: Option<P>,
     input_path: &str,
@@ -382,7 +382,7 @@ pub async fn run<P: AsRef<Path>>(
 ) -> Result<()> {
     let start_time = Instant::now();
     let version: String = env!("CARGO_PKG_VERSION").to_string();
-    let tool_version = format!("deacon {}", version);
+    let tool_version = format!("deacon {version}");
 
     // Configure thread pool if nonzero
     if threads > 0 {
@@ -399,20 +399,20 @@ pub async fn run<P: AsRef<Path>>(
     let paired_stdin = input_path == "-" && input2_path.is_some() && input2_path.unwrap() == "-";
     if paired_stdin {
         input_type.push_str("interleaved");
-    } else if let Some(_) = input2_path {
+    } else if input2_path.is_some() {
         input_type.push_str("paired");
     } else {
         input_type.push_str("single");
     }
-    options.push(format!("match_threshold={}", match_threshold));
+    options.push(format!("match_threshold={match_threshold}"));
     if prefix_length > 0 {
-        options.push(format!("prefix_length={}", prefix_length));
+        options.push(format!("prefix_length={prefix_length}"));
     }
     if rename {
         options.push("rename".to_string());
     }
     if threads > 0 {
-        options.push(format!("threads={}", threads));
+        options.push(format!("threads={threads}"));
     }
 
     eprintln!(
@@ -432,8 +432,7 @@ pub async fn run<P: AsRef<Path>>(
 
     let load_time = start_time.elapsed();
     eprintln!(
-        "Loaded index (k={}, w={}) in {:.2?}",
-        kmer_length, window_size, load_time
+        "Loaded index (k={kmer_length}, w={window_size}) in {load_time:.2?}"
     );
 
     // Create the appropriate writer(s) based on the output path(s)
@@ -587,8 +586,7 @@ pub async fn run<P: AsRef<Path>>(
 
     // Print completion message with speed
     eprintln!(
-        "Completed in {:.2?}. Speed: {:.0} seqs/s ({:.1} Mbp/s)",
-        total_time, seqs_per_sec, mbp_per_sec
+        "Completed in {total_time:.2?}. Speed: {seqs_per_sec:.0} seqs/s ({mbp_per_sec:.1} Mbp/s)"
     );
 
     // Build and write a JSON summary if path provided
@@ -614,15 +612,15 @@ pub async fn run<P: AsRef<Path>>(
             prefix_length,
             deplete,
             rename,
-            seqs_in: total_seqs as u64,
-            seqs_out: seqs_out as u64,
+            seqs_in: total_seqs,
+            seqs_out,
             seqs_out_proportion: output_seq_proportion,
-            seqs_removed: filtered_seqs as u64,
+            seqs_removed: filtered_seqs,
             seqs_removed_proportion: filtered_proportion,
-            bp_in: total_bp as u64,
-            bp_out: output_bp as u64,
+            bp_in: total_bp,
+            bp_out: output_bp,
             bp_out_proportion: output_bp_proportion,
-            bp_removed: filtered_bp as u64,
+            bp_removed: filtered_bp,
             bp_removed_proportion: filtered_bp_proportion,
             time: total_time.as_secs_f64(),
             seqs_per_second: seqs_per_sec as u64,
@@ -631,13 +629,13 @@ pub async fn run<P: AsRef<Path>>(
 
         // Write summary file
         let file = File::create(summary_file)
-            .context(format!("Failed to create summary: {:?}", summary_file))?;
+            .context(format!("Failed to create summary: {summary_file:?}"))?;
         let writer = BufWriter::new(file);
 
         // Serialise and write the summary JSON
         serde_json::to_writer_pretty(writer, &summary).context("Failed to write summary")?;
 
-        eprintln!("Summary saved to {:?}", summary_file);
+        eprintln!("Summary saved to {summary_file:?}");
     }
 
     Ok(())
@@ -691,6 +689,7 @@ fn get_hashes_from_record_pair(
     (minimizer_buffer1, seq1_len, seq2_len)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_single_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     input_path: &str,
@@ -757,7 +756,7 @@ async fn process_single_seqs(
         let (batch_minimizers, seq_lens): (Vec<Vec<u64>>, Vec<usize>) = batch
             .par_iter()
             .map(|record_data| {
-                get_hashes_from_record(&record_data, kmer_length, prefix_length, window_size)
+                get_hashes_from_record(record_data, kmer_length, prefix_length, window_size)
             })
             .unzip();
 
@@ -849,6 +848,7 @@ async fn process_single_seqs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     input1_path: &str,
@@ -942,7 +942,6 @@ async fn process_paired_seqs(
         let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
             batch_result
                 .into_iter()
-                .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
                 .multiunzip();
 
         // Check if minimizers match the index
@@ -1076,6 +1075,7 @@ async fn process_paired_seqs(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_interleaved_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
     writer: &mut Box<dyn FastxWriter>,
@@ -1187,7 +1187,6 @@ async fn process_interleaved_paired_seqs(
         let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
             batch_result
                 .into_iter()
-                .map(|(minimizers, seq1_len, seq2_len)| (minimizers, seq1_len, seq2_len))
                 .multiunzip();
 
         // Check if minimizers match the index
