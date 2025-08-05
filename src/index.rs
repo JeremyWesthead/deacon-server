@@ -5,7 +5,7 @@ use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use needletail::{parse_fastx_file, parse_fastx_stdin};
@@ -38,7 +38,7 @@ impl IndexHeader {
     }
 
     /// Validate header
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.format_version != 2 {
             return Err(anyhow::anyhow!(
                 "Unsupported index format version: {}",
@@ -77,7 +77,12 @@ pub fn load_header_and_count(path: &PathBuf) -> Result<(IndexHeader, usize)> {
     Ok((header, count))
 }
 
-/// Load the hashes without spiking memory usage with an extra vec
+/// Load the hashes without spiking memory usage with an extra vec.
+/// If a path is provided, it will read the minimizers from the file and return them in a FxHashSet
+/// 
+/// If no path is provided, it will try to load the header from a server, returning the minimizers as None
+/// This is used for server mode, where the header is important, but local minimizers are not needed.
+/// If the server feature is not enabled, it will return an error. 
 pub fn load_minimizer_hashes(
     path_option: &Option<&PathBuf>,
     _server_address_option: &Option<String>,
@@ -301,14 +306,13 @@ pub fn build(
 }
 
 /// Stream minimizers from a FASTX file or stdin and remove those present in first_minimizers
-fn stream_diff_fastx<P: AsRef<Path>>(
-    fastx_path: P,
+fn stream_diff_fastx(
+    path: &PathBuf,
     kmer_length: usize,
     window_size: usize,
     first_header: &IndexHeader,
     first_minimizers: &mut FxHashSet<u64>,
 ) -> Result<(usize, usize)> {
-    let path = fastx_path.as_ref();
 
     // Validate parameters match the first index
     if kmer_length != first_header.kmer_length() || window_size != first_header.window_size() {

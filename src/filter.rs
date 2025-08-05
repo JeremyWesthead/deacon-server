@@ -25,6 +25,7 @@ use zstd::stream::write::Encoder as ZstdEncoder;
 
 const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 
+/// Data structure to hold a fastq record
 struct RecordData {
     id: Vec<u8>,
     seq: Vec<u8>,
@@ -282,8 +283,6 @@ pub fn input_should_be_output(
         }
     };
 
-    
-
     if deplete {
         // Deplete mode: remove pairs that meet the threshold
         hit_count < required_hits
@@ -294,7 +293,7 @@ pub fn input_should_be_output(
 }
 
 /// Given a set of index minimizers and a vector of input minimizers,
-/// return a vector of booleans indicating whether each input matches the index
+/// return a vector of booleans indicating whether each input should be output
 pub fn inputs_should_be_output(
     index_minimizers: &FxHashSet<u64>,
     input_minimizers: &Vec<Vec<u64>>,
@@ -310,7 +309,7 @@ pub fn inputs_should_be_output(
 }
 
 /// Send minimizers to server for checking against index.
-/// Equivalent functionality to `inputs_should_be_output, but remote
+/// Equivalent functionality to `inputs_should_be_output`, but remote
 #[cfg(feature = "server")]
 fn send_all_minimizers_to_server(
     input_minimizers: Vec<Vec<u64>>,
@@ -342,6 +341,9 @@ fn send_all_minimizers_to_server(
     }
 }
 
+/// Given a set of input minimizers, check if they should be output
+/// If index minimizers are provided, check locally.
+/// If not, send to server for checking. Requires the `server` feature to be enabled.
 pub fn check_inputs_should_be_output(
     index_minimizers: &Option<FxHashSet<u64>>,
     input_minimizers: &Vec<Vec<u64>>,
@@ -376,6 +378,56 @@ pub fn check_inputs_should_be_output(
         }
     }
 }
+
+/// Get minimizer hashes from a single record.
+fn get_hashes_from_record(
+    record_data: &RecordData,
+    kmer_length: usize,
+    prefix_length: usize,
+    window_size: usize,
+) -> (Vec<u64>, usize) {
+    let seq_len = record_data.seq.len();
+    let mut minimizer_buffer = Vec::with_capacity(64);
+
+    if seq_len >= kmer_length {
+        // Apply prefix length limit if specified
+        let effective_seq = if prefix_length > 0 && seq_len > prefix_length {
+            &record_data.seq[..prefix_length]
+        } else {
+            &record_data.seq
+        };
+
+        // Get minimizer hash values using parameters from header
+        fill_minimizer_hashes(
+            effective_seq,
+            kmer_length,
+            window_size,
+            &mut minimizer_buffer,
+        );
+    }
+
+    (minimizer_buffer, seq_len)
+}
+
+/// Get minimizer hashes from a pair of records.
+fn get_hashes_from_record_pair(
+    record_data1: &RecordData,
+    record_data2: &RecordData,
+    kmer_length: usize,
+    prefix_length: usize,
+    window_size: usize,
+) -> (Vec<u64>, usize, usize) {
+    let (mut minimizer_buffer1, seq1_len) =
+        get_hashes_from_record(record_data1, kmer_length, prefix_length, window_size);
+    let (mut minimizer_buffer2, seq2_len) =
+        get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
+    // Combine the two minimizer buffers
+    minimizer_buffer1.append(&mut minimizer_buffer2);
+    
+    (minimizer_buffer1, seq1_len, seq2_len)
+}
+
+/// Run deacon filter with the provided parameters.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     minimizers_path: Option<&PathBuf>,
@@ -647,56 +699,7 @@ pub fn run(
     Ok(())
 }
 
-/// Get minimizer hashes from a single record.
-fn get_hashes_from_record(
-    record_data: &RecordData,
-    kmer_length: usize,
-    prefix_length: usize,
-    window_size: usize,
-) -> (Vec<u64>, usize) {
-    let seq_len = record_data.seq.len();
-    let mut minimizer_buffer = Vec::with_capacity(64);
-
-    if seq_len >= kmer_length {
-        // Apply prefix length limit if specified
-        let effective_seq = if prefix_length > 0 && seq_len > prefix_length {
-            &record_data.seq[..prefix_length]
-        } else {
-            &record_data.seq
-        };
-
-        // Get minimizer hash values using parameters from header
-        fill_minimizer_hashes(
-            effective_seq,
-            kmer_length,
-            window_size,
-            &mut minimizer_buffer,
-        );
-    }
-
-    (minimizer_buffer, seq_len)
-}
-
-/// Get minimizer hashes from a pair of records.
-fn get_hashes_from_record_pair(
-    record_data1: &RecordData,
-    record_data2: &RecordData,
-    kmer_length: usize,
-    prefix_length: usize,
-    window_size: usize,
-) -> (Vec<u64>, usize, usize) {
-    let (mut minimizer_buffer1, seq1_len) =
-        get_hashes_from_record(record_data1, kmer_length, prefix_length, window_size);
-    let (mut minimizer_buffer2, seq2_len) =
-        get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
-    // Combine the two minimizer buffers
-    eprintln!("{} {}", minimizer_buffer1.len(), minimizer_buffer2.len());
-    minimizer_buffer1.append(&mut minimizer_buffer2);
-    eprintln!("{} {}\n", minimizer_buffer1.len(), minimizer_buffer2.len());
-
-    (minimizer_buffer1, seq1_len, seq2_len)
-}
-
+/// Filter a single (unpaired) sequence.
 #[allow(clippy::too_many_arguments)]
 fn process_single_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
@@ -855,6 +858,7 @@ fn process_single_seqs(
     Ok(())
 }
 
+/// Filter a pair of sequences
 #[allow(clippy::too_many_arguments)]
 fn process_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,
@@ -1079,6 +1083,8 @@ fn process_paired_seqs(
     Ok(())
 }
 
+/// Filter a pair of interleaved sequences
+/// Functionally very similar to `process_paired_seqs`, but handles interleaved input
 #[allow(clippy::too_many_arguments)]
 fn process_interleaved_paired_seqs(
     minimizer_hashes: &Option<FxHashSet<u64>>,

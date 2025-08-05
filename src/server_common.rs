@@ -18,14 +18,16 @@ pub struct FilterRequest {
 }
 
 /// Response structure for filter results
-/// Returns whether this set of minimizers matches the index
+/// Returns whether this set of minimizers should be output
 #[derive(Serialize, Deserialize)]
 pub struct FilterResponse {
-    /// Indicates if the input minimizers match the index
+    /// Indicates if the input minimizers should be output
     pub should_output: Vec<bool>,
 }
 
 /// Get the header of the index loaded into a remote server
+/// Required in order to ensure that the locally computed minimizers match
+/// the kmer length and window size
 pub fn get_server_index_header(server_address: &str) -> Result<IndexHeader> {
     // Create a client to send the minimizers to the server
     let client = Client::new();

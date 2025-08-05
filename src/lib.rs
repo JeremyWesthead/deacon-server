@@ -28,9 +28,10 @@ pub use minimizers::{
 
 use anyhow::Result;
 use rustc_hash::FxHashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
+/// Match threshold for filtering sequences.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MatchThreshold {
     Absolute(usize),
@@ -105,9 +106,9 @@ pub struct FilterConfig {
 }
 
 impl FilterConfig {
-    pub fn new<P: AsRef<Path>>(minimizers_path: P) -> Self {
+    pub fn new(minimizers_path: PathBuf) -> Self {
         Self {
-            minimizers_path: minimizers_path.as_ref().to_path_buf(),
+            minimizers_path: minimizers_path,
             input_path: "-".to_string(),
             input2_path: None,
             output_path: "-".to_string(),
@@ -122,23 +123,23 @@ impl FilterConfig {
         }
     }
 
-    pub fn with_input<S: Into<String>>(mut self, input_path: S) -> Self {
+    pub fn with_input(mut self, input_path: String) -> Self {
         self.input_path = input_path.into();
         self
     }
 
-    pub fn with_input2<S: Into<String>>(mut self, input2_path: S) -> Self {
-        self.input2_path = Some(input2_path.into());
+    pub fn with_input2(mut self, input2_path: String) -> Self {
+        self.input2_path = Some(input2_path);
         self
     }
 
-    pub fn with_output<S: Into<String>>(mut self, output_path: S) -> Self {
-        self.output_path = output_path.into();
+    pub fn with_output(mut self, output_path: String) -> Self {
+        self.output_path = output_path;
         self
     }
 
-    pub fn with_output2<S: Into<String>>(mut self, output2_path: S) -> Self {
-        self.output2_path = Some(output2_path.into());
+    pub fn with_output2(mut self, output2_path: String) -> Self {
+        self.output2_path = Some(output2_path);
         self
     }
 
@@ -152,8 +153,8 @@ impl FilterConfig {
         self
     }
 
-    pub fn with_summary<P: AsRef<Path>>(mut self, summary_path: P) -> Self {
-        self.summary_path = Some(summary_path.as_ref().to_path_buf());
+    pub fn with_summary(mut self, summary_path: PathBuf) -> Self {
+        self.summary_path = Some(summary_path);
         self
     }
 
@@ -219,9 +220,9 @@ pub struct IndexConfig {
 
 impl IndexConfig {
     /// Create a new index configuration with the specified input path
-    pub fn new<P: AsRef<Path>>(input_path: P) -> Self {
+    pub fn new(input_path: PathBuf) -> Self {
         Self {
-            input_path: input_path.as_ref().to_path_buf(),
+            input_path: input_path,
             kmer_length: DEFAULT_KMER_LENGTH,
             window_size: DEFAULT_WINDOW_SIZE,
             output_path: None,
@@ -243,8 +244,8 @@ impl IndexConfig {
     }
 
     /// Set output path
-    pub fn with_output<P: AsRef<Path>>(mut self, output_path: P) -> Self {
-        self.output_path = Some(output_path.as_ref().to_path_buf());
+    pub fn with_output(mut self, output_path: PathBuf) -> Self {
+        self.output_path = Some(output_path);
         self
     }
 

@@ -12,9 +12,13 @@ use axum::{
 };
 use rustc_hash::FxHashSet;
 
+/// Shared index file between endpoint calls.
 static INDEX: OnceLock<FxHashSet<u64>> = OnceLock::new();
+/// Shared index header between endpoint calls.
 static INDEX_HEADER: OnceLock<IndexHeader> = OnceLock::new();
 
+/// Starts the server with the given index path and port.
+/// To log the server's connections, set `RUST_LOG=trace` in your environment variables.
 pub async fn run_server(index_path: PathBuf, port: u16) {
     // initialize tracing
     tracing_subscriber::fmt::init();
@@ -61,8 +65,9 @@ fn load_index(index_path: PathBuf) {
     }
 }
 
-// basic handler that responds with a static string
-async fn root() -> String {
+/// Basic root, returing a message indicating the index is loaded
+/// Endpoint is `/`
+pub async fn root() -> String {
     let index = INDEX.get().expect("Index not loaded");
     let header = INDEX_HEADER.get().expect("Index header not loaded");
 
@@ -74,13 +79,15 @@ async fn root() -> String {
 }
 
 /// Endpoint to return the header of the loaded index
-async fn index_header() -> Json<IndexHeader> {
+/// Endpoint is `/index_header`
+pub async fn index_header() -> Json<IndexHeader> {
     let header = INDEX_HEADER.get().expect("Index header not loaded");
     Json(header.clone())
 }
 
-// Endpoint which takes a set of hashes, returning whether they match the index
-async fn should_output(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
+/// Endpoint which takes a set of hashes, returning whether they match the index
+/// Endpoint is `/should_output`
+pub async fn should_output(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
     Json(FilterResponse {
         should_output: inputs_should_be_output(
             INDEX.get().expect("Index not loaded"),
