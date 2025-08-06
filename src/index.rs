@@ -79,10 +79,10 @@ pub fn load_header_and_count(path: &PathBuf) -> Result<(IndexHeader, usize)> {
 
 /// Load the hashes without spiking memory usage with an extra vec.
 /// If a path is provided, it will read the minimizers from the file and return them in a FxHashSet
-/// 
+///
 /// If no path is provided, it will try to load the header from a server, returning the minimizers as None
 /// This is used for server mode, where the header is important, but local minimizers are not needed.
-/// If the server feature is not enabled, it will return an error. 
+/// If the server feature is not enabled, it will return an error.
 pub fn load_minimizer_hashes(
     path_option: &Option<&PathBuf>,
     _server_address_option: &Option<String>,
@@ -313,7 +313,6 @@ fn stream_diff_fastx(
     first_header: &IndexHeader,
     first_minimizers: &mut FxHashSet<u64>,
 ) -> Result<(usize, usize)> {
-
     // Validate parameters match the first index
     if kmer_length != first_header.kmer_length() || window_size != first_header.window_size() {
         return Err(anyhow::anyhow!(

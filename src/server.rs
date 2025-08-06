@@ -1,6 +1,6 @@
 //! Functionality to create a server endpoint which can be used to filter based on a pre-loaded index
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::filter::inputs_should_be_output;
 use crate::index::{IndexHeader, load_minimizer_hashes};
@@ -13,24 +13,32 @@ use axum::{
 use rustc_hash::FxHashSet;
 
 /// Shared index file between endpoint calls.
-static INDEX: OnceLock<FxHashSet<u64>> = OnceLock::new();
+/// Annoyingly, we have to use an Option as the default/empty FxHashSet is not static
+static INDEX: Mutex<Option<FxHashSet<u64>>> = Mutex::new(None);
+
 /// Shared index header between endpoint calls.
-static INDEX_HEADER: OnceLock<IndexHeader> = OnceLock::new();
+/// Initalised to a dummy value, which will be replaced when the index is loaded.
+static INDEX_HEADER: Mutex<IndexHeader> = Mutex::new(IndexHeader {
+    format_version: 0,
+    kmer_length: 0,
+    window_size: 0,
+});
+
+/// Just for ensuring we get a single tracing setup.
+/// Mostly needed as tests otherwise try to spawn multiple
+static TRACING: OnceLock<()> = OnceLock::new();
 
 /// Starts the server with the given index path and port.
 /// To log the server's connections, set `RUST_LOG=trace` in your environment variables.
 pub async fn run_server(index_path: PathBuf, port: u16) {
     // initialize tracing
-    tracing_subscriber::fmt::init();
+    TRACING.get_or_init(|| {
+        tracing_subscriber::fmt::init();
+    });
 
+    eprintln!("Loading index from: {}", index_path.display());
     // Load the index before starting the server to ensure it's available for requests
     load_index(index_path);
-
-    eprintln!(
-        "Index loaded with {} minimizers and header: {:?}",
-        INDEX.get().expect("Index not loaded").len(),
-        INDEX_HEADER.get().expect("Index header not loaded")
-    );
 
     // build our application with a route
     let app = Router::new()
@@ -55,8 +63,8 @@ fn load_index(index_path: PathBuf) {
     let result = load_minimizer_hashes(&Some(&index_path), &None);
     match result {
         Ok((minimizers, header)) => {
-            INDEX.get_or_init(|| minimizers.unwrap());
-            INDEX_HEADER.get_or_init(|| header);
+            *INDEX.lock().unwrap() = minimizers;
+            *INDEX_HEADER.lock().unwrap() = header;
         }
         Err(e) => {
             eprintln!("Failed to load index: {e}");
@@ -68,32 +76,44 @@ fn load_index(index_path: PathBuf) {
 /// Basic root, returing a message indicating the index is loaded
 /// Endpoint is `/`
 pub async fn root() -> String {
-    let index = INDEX.get().expect("Index not loaded");
-    let header = INDEX_HEADER.get().expect("Index header not loaded");
-
-    format!(
-        "Index loaded with {} minimizers and header: {:?}",
-        index.len(),
-        header
-    )
+    let index = INDEX.lock();
+    match index {
+        Ok(index) => {
+            let index = index.as_ref().expect("Index not loaded");
+            let header = INDEX_HEADER.lock().unwrap();
+            format!(
+                "Index loaded with {} minimizers and header: {:?}",
+                index.len(),
+                header
+            )
+        }
+        Err(e) => format!("Error accessing index: {e}"),
+    }
 }
 
 /// Endpoint to return the header of the loaded index
 /// Endpoint is `/index_header`
 pub async fn index_header() -> Json<IndexHeader> {
-    let header = INDEX_HEADER.get().expect("Index header not loaded");
+    let header = INDEX_HEADER.lock().unwrap();
     Json(header.clone())
 }
 
 /// Endpoint which takes a set of hashes, returning whether they match the index
 /// Endpoint is `/should_output`
 pub async fn should_output(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
-    Json(FilterResponse {
-        should_output: inputs_should_be_output(
-            INDEX.get().expect("Index not loaded"),
-            &request.input,
-            &request.match_threshold,
-            request.deplete,
-        ),
-    })
+    let index = INDEX.lock();
+    match index {
+        Ok(index) => {
+            let index = index.as_ref().expect("Index not loaded");
+            Json(FilterResponse {
+                should_output: inputs_should_be_output(
+                    index,
+                    &request.input,
+                    &request.match_threshold,
+                    request.deplete,
+                ),
+            })
+        }
+        Err(e) => panic!("Error accessing index: {e}"),
+    }
 }

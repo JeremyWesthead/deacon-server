@@ -423,7 +423,7 @@ fn get_hashes_from_record_pair(
         get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
     // Combine the two minimizer buffers
     minimizer_buffer1.append(&mut minimizer_buffer2);
-    
+
     (minimizer_buffer1, seq1_len, seq2_len)
 }
 

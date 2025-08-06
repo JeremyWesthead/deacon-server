@@ -108,7 +108,7 @@ pub struct FilterConfig {
 impl FilterConfig {
     pub fn new(minimizers_path: PathBuf) -> Self {
         Self {
-            minimizers_path: minimizers_path,
+            minimizers_path,
             input_path: "-".to_string(),
             input2_path: None,
             output_path: "-".to_string(),
@@ -124,7 +124,7 @@ impl FilterConfig {
     }
 
     pub fn with_input(mut self, input_path: String) -> Self {
-        self.input_path = input_path.into();
+        self.input_path = input_path;
         self
     }
 
@@ -222,7 +222,7 @@ impl IndexConfig {
     /// Create a new index configuration with the specified input path
     pub fn new(input_path: PathBuf) -> Self {
         Self {
-            input_path: input_path,
+            input_path,
             kmer_length: DEFAULT_KMER_LENGTH,
             window_size: DEFAULT_WINDOW_SIZE,
             output_path: None,
