@@ -13,13 +13,6 @@ use needletail::{parse_fastx_file, parse_fastx_stdin};
 #[cfg(feature = "server")]
 use crate::server_common::get_server_index_header;
 
-/// Serialisable index file
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Index {
-    pub header: IndexHeader,
-    pub minimizers: FxHashSet<u64>,
-}
-
 /// Serialisable header for the index file
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexHeader {
