@@ -1,26 +1,16 @@
 //! Functionality to create a server endpoint which can be used to filter based on a pre-loaded index
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 
 use crate::filter::get_index_matches;
 use crate::index::{IndexHeader, load_minimizer_hashes};
 use crate::server_common::{FilterRequest, FilterResponse};
-use axum::handler::Handler;
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::DefaultBodyLimit,
     routing::{get, post},
-    http::StatusCode,
 };
 use rustc_hash::FxHashSet;
-
-// type SharedState = AppState;
-
-// #[derive(Clone)]
-// pub struct AppState {
-//     pub index: FxHashSet<u64>,
-//     pub index_header: IndexHeader,
-// }
 
 /// Shared index file between endpoint calls.
 static INDEX: RwLock<Option<FxHashSet<u64>>> = RwLock::new(None);
