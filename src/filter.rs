@@ -1,4 +1,5 @@
 use crate::index::load_minimizer_hashes;
+use rayon::prelude::*;
 use anyhow::{Context, Result};
 use flate2::write::GzEncoder;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -16,11 +17,15 @@ use serde::{Deserialize, Serialize};
 use simd_minimizers;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use xxhash_rust;
 use zstd::stream::write::Encoder as ZstdEncoder;
+use crate::server_common::{FilterRequest, FilterResponse};
+
+#[cfg(feature = "server")]
+use reqwest::blocking::Client;
 
 const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
@@ -137,11 +142,99 @@ fn get_writer(output_path: &str, compression_level: u8) -> Result<BoxedWriter> {
     }
 }
 
+/// Get index matches for a set of hashes against a minimizer index
+/// If debug is enabled, also return the k-mer sequences
+pub fn get_index_matches(index: &FxHashSet<u64>, hashes: &[u64], valid_positions: Vec<u32>, effective_seqs: Vec<Vec<u8>>, kmer_length: usize, debug: bool) -> (Vec<String>, usize){
+    let mut hit_kmers = Vec::new();
+    let mut hit_count = 0;
+    let mut seen_hits = FxHashSet::default();
+
+    for (i, &hash) in hashes.iter().enumerate() {
+        if index.contains(&hash) && seen_hits.insert(hash) {
+            hit_count += 1;
+            // Extract the k-mer sequence at this position
+            if debug && i < valid_positions.len() {
+                let pos = valid_positions[i] as usize;
+                let mut idx = 0;
+                if effective_seqs.len() != 1 {
+                    idx = i;
+                }
+                let kmer = &effective_seqs[idx][pos..pos + kmer_length];
+                hit_kmers.push(String::from_utf8_lossy(kmer).to_string());
+            }
+        }
+    }
+    (hit_kmers, hit_count)
+}
+
+/// Indentical to `get_index_matches`, but uses a read lock on the index
+/// This is useful for concurrent access to the index
+pub fn get_index_matches_rwlock(index: &'static RwLock<Option<FxHashSet<u64>>>, hashes: &[u64], valid_positions: Vec<u32>, effective_seqs: Vec<Vec<u8>>, kmer_length: usize, debug: bool) -> (Vec<String>, usize){
+    let mut hit_kmers = Vec::new();
+    let mut hit_count = 0;
+    let mut seen_hits = FxHashSet::default();
+
+    let idx = index.read().unwrap();
+    let index_matches: Vec<bool> = hashes.par_iter().map(|hash| idx.as_ref().unwrap().contains(&hash)).collect();
+    drop(idx);
+
+    for (i, (&hash, index_match)) in hashes.iter().zip(index_matches).enumerate() {
+        if index_match && seen_hits.insert(hash) {
+            hit_count += 1;
+            // Extract the k-mer sequence at this position
+            if debug && i < valid_positions.len() {
+                let pos = valid_positions[i] as usize;
+                let mut idx = 0;
+                if effective_seqs.len() != 1 {
+                    idx = i;
+                }
+                let kmer = &effective_seqs[idx][pos..pos + kmer_length];
+                hit_kmers.push(String::from_utf8_lossy(kmer).to_string());
+            }
+        }
+    }
+    (hit_kmers, hit_count)
+}
+
+/// Get index matches from a remote server
+/// Equivalent to `get_index_matches`, but with a remote index
+#[cfg(feature = "server")]
+fn get_remote_matches(server_address: String, hashes: &[u64], valid_positions: Vec<u32>, effective_seqs: Vec<Vec<u8>>, kmer_length: usize, debug: bool) -> Result<(Vec<String>, usize)> {
+    // Create a client to send the minimizers to the server
+
+    let client = Client::new();
+
+    // Send the minimizers as a POST request
+    let response = client
+        .post(server_address.to_owned() + "/get_index_matches")
+        .json(&FilterRequest {
+            hashes: hashes.to_vec(),
+            valid_positions,
+            effective_seqs: effective_seqs,
+            kmer_length,
+            debug,
+        })
+        .send()?;
+
+    // Check if the response indicates a match
+    if response.status().is_success() {
+
+        let result = response.json::<FilterResponse>()?;
+        Ok((result.hit_kmers, result.hit_count))
+    } else {
+        Err(anyhow::anyhow!(
+            "Server returned an error: {}",
+            response.status()
+        ))
+    }
+}
+
 // JSON summary structure
 #[derive(Serialize, Deserialize)]
 pub struct FilterSummary {
     version: String,
-    index: String,
+    index: Option<String>,
+    server_address: Option<String>,
     input: String,
     input2: Option<String>,
     output: String,
@@ -171,7 +264,8 @@ pub struct FilterSummary {
 #[derive(Clone)]
 struct FilterProcessor {
     // Minimizer matching parameters
-    minimizer_hashes: Arc<FxHashSet<u64>>,
+    minimizer_hashes: Arc<Option<FxHashSet<u64>>>,
+    server_address: Option<String>,
     kmer_length: u8,
     window_size: u8,
     abs_threshold: usize,
@@ -225,7 +319,8 @@ impl FilterProcessor {
         }
     }
     fn new(
-        minimizer_hashes: Arc<FxHashSet<u64>>,
+        minimizer_hashes: Arc<Option<FxHashSet<u64>>>,
+        server_address: Option<String>,
         kmer_length: u8,
         window_size: u8,
         abs_threshold: usize,
@@ -241,6 +336,7 @@ impl FilterProcessor {
     ) -> Self {
         Self {
             minimizer_hashes,
+            server_address,
             kmer_length,
             window_size,
             abs_threshold,
@@ -259,6 +355,32 @@ impl FilterProcessor {
         }
     }
 
+    fn get_index_matches(&self, hashes: &[u64], valid_positions: Vec<u32>, effective_seqs: Vec<Vec<u8>>) -> (Vec<String>, usize) {
+        if self.minimizer_hashes.is_none() {
+            // No local index loaded, so check for server address
+            // Iff server feature is enabled and a server address is given, send request to server
+            // Else, panic
+            match &self.server_address {
+                Some(address) => {
+                    #[cfg(feature = "server")]
+                    {
+                        get_remote_matches(address.clone(), hashes, valid_positions, effective_seqs, self.kmer_length as usize, self.debug).expect("Failed to get remote matches from server")
+                    }
+                    #[cfg(not(feature = "server"))]
+                    {
+                        panic!("Server feature is not enabled. Cannot check input against index.");
+                    }
+                }
+                None => {
+                    panic!("No minimizers loaded and no server address provided.");
+                }
+            }
+        } else {
+            // We have a local index, so use it
+            get_index_matches(self.minimizer_hashes.as_ref().as_ref().unwrap(), hashes, valid_positions, effective_seqs, self.kmer_length as usize, self.debug)
+        }
+    }
+
     fn should_keep_sequence(&self, seq: &[u8]) -> (bool, usize, usize, Vec<String>) {
         if seq.len() < self.kmer_length as usize {
             return (self.deplete, 0, 0, Vec::new()); // If too short, keep if in deplete mode
@@ -266,67 +388,19 @@ impl FilterProcessor {
 
         // Apply prefix length limit if specified
         let effective_seq = if self.prefix_length > 0 && seq.len() > self.prefix_length {
-            &seq[..self.prefix_length]
+            seq[..self.prefix_length].to_vec()
         } else {
-            seq
+            seq.to_vec()
         };
 
-        // Get minimizer positions first
-        let canonical_seq = effective_seq
-            .iter()
-            .map(|&b| match b {
-                b'A' | b'a' => b'A',
-                b'C' | b'c' => b'C',
-                b'G' | b'g' => b'G',
-                b'T' | b't' => b'T',
-                _ => b'C', // Default for ambiguous bases
-            })
-            .collect::<Vec<u8>>();
-
-        let mut positions = Vec::new();
-        simd_minimizers::canonical_minimizer_positions(
-            packed_seq::AsciiSeq(&canonical_seq),
-            self.kmer_length as usize,
-            self.window_size as usize,
-            &mut positions,
-        );
-
-        // Filter positions to only include k-mers with ACGT bases
-        let valid_positions: Vec<u32> = positions
-            .into_iter()
-            .filter(|&pos| {
-                let pos_usize = pos as usize;
-                let kmer = &effective_seq[pos_usize..pos_usize + self.kmer_length as usize];
-                kmer.iter()
-                    .all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't'))
-            })
-            .collect();
-
-        // Get hash values for valid positions
-        let minimizer_values: Vec<u64> = simd_minimizers::iter_canonical_minimizer_values(
-            packed_seq::AsciiSeq(&canonical_seq),
-            self.kmer_length as usize,
-            &valid_positions,
-        )
-        .map(|kmer| xxhash_rust::xxh3::xxh3_64(&kmer.to_le_bytes()))
-        .collect();
+        let (minimizer_values, valid_positions) = self.get_minimizer_hashes_and_positions(seq);
 
         // Count distinct minimizer hits and collect matching k-mers
-        let mut seen_hits = FxHashSet::default();
-        let mut hit_count = 0;
-        let mut hit_kmers = Vec::new();
-
-        for (i, &hash) in minimizer_values.iter().enumerate() {
-            if self.minimizer_hashes.contains(&hash) && seen_hits.insert(hash) {
-                hit_count += 1;
-                // Extract the k-mer sequence at this position
-                if self.debug && i < valid_positions.len() {
-                    let pos = valid_positions[i] as usize;
-                    let kmer = &effective_seq[pos..pos + self.kmer_length as usize];
-                    hit_kmers.push(String::from_utf8_lossy(kmer).to_string());
-                }
-            }
-        }
+        let (hit_kmers, hit_count) = self.get_index_matches(
+            &minimizer_values,
+            valid_positions,
+            vec![effective_seq],
+        );
 
         (
             self.meets_filtering_criteria(hit_count, minimizer_values.len()),
@@ -389,19 +463,16 @@ impl FilterProcessor {
         let mut all_hashes = Vec::new();
         let mut all_positions = Vec::new();
         let mut all_sequences = Vec::new();
-        let mut seen_hits_pair = FxHashSet::default();
-        let mut pair_hit_count = 0;
-        let mut hit_kmers = Vec::new();
 
         // Process read 1
         if seq1.len() >= self.kmer_length as usize {
             let effective_seq = if self.prefix_length > 0 && seq1.len() > self.prefix_length {
-                &seq1[..self.prefix_length]
+                seq1[..self.prefix_length].to_vec()
             } else {
-                seq1
+                seq1.to_vec()
             };
 
-            let (hashes, positions) = self.get_minimizer_hashes_and_positions(effective_seq);
+            let (hashes, positions) = self.get_minimizer_hashes_and_positions(&effective_seq);
             all_hashes.extend(hashes);
             all_positions.extend(positions);
             all_sequences.extend(vec![effective_seq; all_hashes.len()]);
@@ -410,32 +481,25 @@ impl FilterProcessor {
         // Process read 2
         if seq2.len() >= self.kmer_length as usize {
             let effective_seq = if self.prefix_length > 0 && seq2.len() > self.prefix_length {
-                &seq2[..self.prefix_length]
+                seq2[..self.prefix_length].to_vec()
             } else {
-                seq2
+                seq2.to_vec()
             };
 
-            let (hashes, positions) = self.get_minimizer_hashes_and_positions(effective_seq);
+            let (hashes, positions) = self.get_minimizer_hashes_and_positions(&effective_seq);
             let start_idx = all_hashes.len();
             all_hashes.extend(hashes);
             all_positions.extend(positions);
             all_sequences.extend(vec![effective_seq; all_hashes.len() - start_idx]);
         }
 
-        // Count hits and collect k-mers
-        for (i, &hash) in all_hashes.iter().enumerate() {
-            if self.minimizer_hashes.contains(&hash) && seen_hits_pair.insert(hash) {
-                pair_hit_count += 1;
-                if self.debug && i < all_positions.len() && i < all_sequences.len() {
-                    let pos = all_positions[i] as usize;
-                    let seq = all_sequences[i];
-                    if pos + self.kmer_length as usize <= seq.len() {
-                        let kmer = &seq[pos..pos + self.kmer_length as usize];
-                        hit_kmers.push(String::from_utf8_lossy(kmer).to_string());
-                    }
-                }
-            }
-        }
+
+        // Count distinct minimizer hits and collect matching k-mers
+        let (hit_kmers, pair_hit_count) = self.get_index_matches(
+            &all_hashes,
+            all_positions,
+            all_sequences,
+        );
 
         let total_minimizers = all_hashes.len();
         (
@@ -729,8 +793,8 @@ impl PairedParallelProcessor for FilterProcessor {
     }
 }
 
-pub fn run<P: AsRef<Path>>(
-    minimizers_path: P,
+pub fn run(
+    minimizers_path: Option<&PathBuf>,
     input_path: &str,
     input2_path: Option<&str>,
     output_path: &str,
@@ -745,6 +809,7 @@ pub fn run<P: AsRef<Path>>(
     compression_level: u8,
     debug: bool,
     quiet: bool,
+    server_address: &Option<String>,
 ) -> Result<()> {
     let start_time = Instant::now();
     let version: String = env!("CARGO_PKG_VERSION").to_string();
@@ -798,7 +863,7 @@ pub fn run<P: AsRef<Path>>(
     }
 
     // Load minimizers hashes and parse header
-    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path)?;
+    let (minimizer_hashes, header) = load_minimizer_hashes(&minimizers_path, server_address)?;
     let minimizer_hashes = Arc::new(minimizer_hashes);
 
     let kmer_length = header.kmer_length();
@@ -840,6 +905,7 @@ pub fn run<P: AsRef<Path>>(
     // Create processor
     let processor = FilterProcessor::new(
         minimizer_hashes,
+        server_address.clone(),
         kmer_length,
         window_size,
         abs_threshold,
@@ -950,10 +1016,15 @@ pub fn run<P: AsRef<Path>>(
     // Build and write JSON summary if path provided
     if let Some(summary_file) = summary_path {
         let seqs_out = total_seqs - filtered_seqs;
+        let mut index_path = None;
+        if let Some(minimizers_path) = minimizers_path {
+            index_path = Some(minimizers_path.to_string_lossy().to_string());
+        }
 
         let summary = FilterSummary {
             version: tool_version,
-            index: minimizers_path.as_ref().to_string_lossy().to_string(),
+            index: index_path,
+            server_address: server_address.clone(),
             input: input_path.to_string(),
             input2: input2_path.map(|s| s.to_string()),
             output: output_path.to_string(),
@@ -1002,7 +1073,8 @@ mod tests {
     fn test_filter_summary() {
         let summary = FilterSummary {
             version: "deacon 0.1.0".to_string(),
-            index: "test.idx".to_string(),
+            index: Some("test.idx".to_string()),
+            server_address: None,
             input: "test.fastq".to_string(),
             input2: Some("test2.fastq".to_string()),
             output: "output.fastq".to_string(),

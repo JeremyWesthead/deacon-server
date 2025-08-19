@@ -12,6 +12,12 @@ pub mod filter;
 pub mod index;
 pub mod minimizers;
 
+
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(feature = "server")]
+pub mod server_common;
+
 // Re-export the important structures and functions for library users
 pub use filter::{FilterSummary, run as run_filter};
 pub use index::{
@@ -27,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 pub struct FilterConfig {
     /// Minimizer index file path
-    pub minimizers_path: PathBuf,
+    pub minimizers_path: Option<PathBuf>,
 
     /// Path to input fastx file (or - for stdin)
     pub input_path: String,
@@ -70,12 +76,15 @@ pub struct FilterConfig {
 
     /// Suppress progress reporting
     pub quiet: bool,
+
+    /// Server address for remote filtering (if using server feature)
+    pub server_address: Option<String>,
 }
 
 impl FilterConfig {
-    pub fn new<P: AsRef<Path>>(minimizers_path: P) -> Self {
+    pub fn new(minimizers_path: Option<PathBuf>) -> Self {
         Self {
-            minimizers_path: minimizers_path.as_ref().to_path_buf(),
+            minimizers_path: minimizers_path,
             input_path: "-".to_string(),
             input2_path: None,
             output_path: "-".to_string(),
@@ -90,6 +99,7 @@ impl FilterConfig {
             compression_level: 2, // Default compression level
             debug: false,
             quiet: false,
+            server_address: None, // No server address by default
         }
     }
 
@@ -163,10 +173,15 @@ impl FilterConfig {
         self
     }
 
+    pub fn with_server_address(mut self, server_address: String) -> Self {
+        self.server_address = Some(server_address);
+        self
+    }
+
     /// Filter with this configuration
     pub fn execute(&self) -> Result<()> {
         filter::run(
-            &self.minimizers_path,
+            self.minimizers_path.as_ref(),
             &self.input_path,
             self.input2_path.as_deref(),
             &self.output_path,
@@ -181,6 +196,7 @@ impl FilterConfig {
             self.compression_level,
             self.debug,
             self.quiet,
+            &self.server_address,
         )
     }
 }
@@ -283,8 +299,8 @@ impl IndexConfig {
     }
 }
 
-pub fn load_minimizers<P: AsRef<Path>>(path: P) -> Result<(FxHashSet<u64>, index::IndexHeader)> {
-    index::load_minimizer_hashes(&path)
+pub fn load_minimizers(path: &PathBuf) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
+    index::load_minimizer_hashes(&Some(path), &None)
 }
 
 pub fn write_minimizers(
