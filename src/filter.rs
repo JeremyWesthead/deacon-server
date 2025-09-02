@@ -652,14 +652,9 @@ pub fn run(
         // Get number of sequences passing filter
         let seqs_out = total_seqs - filtered_seqs;
 
-        let index = match minimizers_path {
-            Some(path) => path.to_string_lossy().to_string(),
-            None => server_address.unwrap(),
-        };
-
         let summary = FilterSummary {
             version: tool_version,
-            index,
+            index: get_summary_index(&minimizers_path, &server_address),
             input: input_path.to_string(),
             input2: input2_path.map(|s| s.to_string()),
             output: output_path.to_string(),
@@ -697,6 +692,42 @@ pub fn run(
     }
 
     Ok(())
+}
+
+
+fn get_summary_index(minimizers_path: &Option<&PathBuf>, server_address: &Option<String>) -> String {
+    let index = match minimizers_path {
+        Some(path) => path.to_string_lossy().to_string(),
+        None => {
+            match &server_address {
+                None => "No index or server specified".to_string(),
+                Some(_addr) => {
+                    #[cfg(feature = "server")]
+                    {
+                        let client = Client::new();
+                        let response = client
+                            .get(_addr.to_owned() + "/index_version")
+                            .send().unwrap_or_else(|e| {
+                                panic!("Failed to contact server at {}: {e}", _addr);
+                            });
+                        if response.status().is_success() {
+                            _addr.to_owned() + ":" + &response
+                                .text().unwrap_or_else(|e| {
+                                    panic!("Failed to parse server response: {e}");
+                                })
+                        } else {
+                            panic!("Server returned error: {}", response.status())
+                        }
+                    }
+                    #[cfg(not(feature = "server"))]
+                    {
+                        panic!("Server feature not enabled, cannot use server address");
+                    }
+                }
+            }
+        },
+    };
+    index
 }
 
 /// Filter a single (unpaired) sequence.

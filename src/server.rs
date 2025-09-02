@@ -24,6 +24,9 @@ static INDEX_HEADER: Mutex<IndexHeader> = Mutex::new(IndexHeader {
     window_size: 0,
 });
 
+/// Shared index hash between endpoint calls.
+static INDEX_HASH: Mutex<Option<String>> = Mutex::new(None);
+
 /// Just for ensuring we get a single tracing setup.
 /// Mostly needed as tests otherwise try to spawn multiple
 static TRACING: OnceLock<()> = OnceLock::new();
@@ -46,6 +49,8 @@ pub async fn run_server(index_path: PathBuf, port: u16) {
         .route("/", get(root))
         // `GET /index_header` returns the index header
         .route("/index_header", get(index_header))
+        // `GET /index_version` returns the index version (hash)
+        .route("/index_version", get(index_version))
         // `POST /filter` goes to `filter`
         .route("/should_output", post(should_output))
         // Increase the body limit to 2GB to ensure we don't error on large payloads
@@ -60,6 +65,11 @@ pub async fn run_server(index_path: PathBuf, port: u16) {
 
 /// Load the index from the specified path.
 fn load_index(index_path: PathBuf) {
+    // Load the hash as well as the file contents for returning as an ugly (but reliable) version
+    let bytes = std::fs::read(index_path.clone()).unwrap();
+    let hash = sha256::digest(&bytes);
+    *INDEX_HASH.lock().unwrap() = Some(index_path.clone().into_os_string().into_string().unwrap() + "@" + &hash);
+
     let result = load_minimizer_hashes(&Some(&index_path), &None);
     match result {
         Ok((minimizers, header)) => {
@@ -96,6 +106,13 @@ pub async fn root() -> String {
 pub async fn index_header() -> Json<IndexHeader> {
     let header = INDEX_HEADER.lock().unwrap();
     Json(header.clone())
+}
+
+/// Endpoint to return the loaded index version
+/// Endpoint is `/index_version`
+pub async fn index_version() -> String {
+    let hash = INDEX_HASH.lock().unwrap();
+    hash.clone().unwrap()
 }
 
 /// Endpoint which takes a set of hashes, returning whether they match the index
