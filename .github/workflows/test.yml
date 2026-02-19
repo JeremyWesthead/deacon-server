@@ -34,4 +34,4 @@ jobs:
     
     - name: Run tests (server)
       # Use --test-threads 1 to avoid issues with parallel testing of server functionality
-      run: cargo test --verbose --features server -- --test-threads 
+      run: cargo test --verbose --features server -- --test-threads 1
