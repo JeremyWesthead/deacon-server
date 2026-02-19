@@ -302,7 +302,7 @@ pub fn paired_should_keep(
 
 /// Given a set of input minimizers from unpaired reads, check if they should be output
 /// If index minimizers are provided, check locally.
-/// If not, send to server for checking. Requires the `server` feature to be enabled.
+/// If not, send to server for checking. Requires the server feature to be enabled.
 pub fn check_single_inputs_should_be_output(
     index_minimizers: &Option<FxHashSet<u64>>,
     input_minimizers_and_positions: &Vec<(Vec<u64>, Vec<u32>, Vec<u8>)>,
@@ -365,7 +365,7 @@ pub fn check_single_inputs_should_be_output(
 
 /// Given a set of input minimizers from paired reads, check if they should be output
 /// If index minimizers are provided, check locally.
-/// If not, send to server for checking. Requires the `server` feature to be enabled.
+/// If not, send to server for checking. Requires the server feature to be enabled.
 pub fn check_paired_inputs_should_be_output(
     index_minimizers: &Option<FxHashSet<u64>>,
     input_minimizers_and_positions: &Vec<(Vec<u64>, Vec<u32>, Vec<Vec<u8>>)>,

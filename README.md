@@ -267,7 +267,7 @@ Almost exactly identical to the `deacon filter` reference, but swapping index pa
 
 
 #### Usage
-```
+```bash
 Requires feature `server`. Alternate version of Filter, swapping local compute for passing to a server which has the index pre-loaded. Will inevitably be slower than local filtering, but saves on index loading. Better used for cases of small input + large index
 
 Usage: deacon client [OPTIONS] <SERVER_ADDRESS> [INPUT] [INPUT2]
