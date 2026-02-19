@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2025-09-01
+
+### Added
+
+- Support for k-mer length up to 57 (previously 32).
+
+## [0.9.0] - 2025-08-15
+
+### Changed
+
+- Performance optimisations deliver up to 80% faster filtering with unchanged accuracy.
+
+  - \>2Gbp/s with uncompressed long read input.
+
+  - \>500Mbp/s with gzip-compressed long read input.
+
+## [0.8.1] - 2025-08-14
+
+### Changed
+
+- Fixes bug handling multiline FASTA input introduced in 0.8.0.
+- Fixes bug handling paired reads introduced in 0.8.0 which could lead to mispaired read output.
+
+## [0.8.0] - 2025-08-11
+
+### Added
+
+- Added new independent absolute (`-a`) and relative (`-r`) match thresholds with respective default values of 2 and 0.01 (1%). The new default relative threshold improves specificity for long sequences over the previous absolute-only default threshold without affecting short read accuracy. These replace the previous dual purpose `-m` parameter which could accept _either_ an absolute (integer) threshold _or_ a relative (float) threshold. 
+- `deacon index` now offers the ability to discard minimizers with information content below a specified scaled Shannon `--entropy` (`-e`) threshold. This is disabled by default.
+- `deacon filter` now has a `--debug` mode which prints all records with minimizer matches to stderr including the matched minimizer sequence(s).
+- The default worst-case hash table capacity preallocation used in `deacon index union` operations can now be overriden with the new `--capacity` (`-c`) argument, in similar fashion to `deacon index build`. 
+
+### Changed
+
+- Filtering performance has improved dramatically on multicore systems due to improved work allocation using the Paraseq library. Filtering at >1Gbp/s is possible with uncompressed long sequences, and >500Mbp/s is achievable on many systems with Gzip-compressed long reads.
+- Minimizers containing ambiguous nucleotides are now ignored.
+
+### Removed
+
+- The filtering argument `--matches` (`-m`) has been removed and replaced with `--abs-threshold` (`-a`) and `--rel-threshold` (`-r`).
+
+
+
+
 ## [0.7.0] - 2025-07-08
 
 ### Added
@@ -19,8 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `deacon index union` now automatically preallocates the required hash table capacity, eliminating slowdowns when combining indexes.
 - Compatible minimizer _k_ and _w_ is now validated (k+w-1 must be odd) prior to indexing.
 - Default index capacity is now 400M (Was 500).
-
-
 
 
 ## [0.6.0] - 2025-06-25

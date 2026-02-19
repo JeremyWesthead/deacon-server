@@ -1,3 +1,6 @@
+use crate::IndexConfig;
+#[cfg(feature = "server")]
+use crate::server_common::get_server_index_header;
 use anyhow::{Context, Result};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use rayon::prelude::*;
@@ -22,11 +25,11 @@ pub struct IndexHeader {
 }
 
 impl IndexHeader {
-    pub fn new(kmer_length: usize, window_size: usize) -> Self {
+    pub fn new(kmer_length: u8, window_size: u8) -> Self {
         IndexHeader {
             format_version: 2,
-            kmer_length: kmer_length as u8,
-            window_size: window_size as u8,
+            kmer_length,
+            window_size,
         }
     }
 
@@ -43,13 +46,13 @@ impl IndexHeader {
     }
 
     /// Get k
-    pub fn kmer_length(&self) -> usize {
-        self.kmer_length as usize
+    pub fn kmer_length(&self) -> u8 {
+        self.kmer_length
     }
 
     /// Get w
-    pub fn window_size(&self) -> usize {
-        self.window_size as usize
+    pub fn window_size(&self) -> u8 {
+        self.window_size
     }
 }
 
@@ -189,28 +192,32 @@ pub fn build(
     );
 
     // Ensure l = k + w - 1 is odd so that canonicalisation tie breaks work correctly
-    let l = kmer_length + window_size - 1;
+    let l = config.kmer_length as usize + config.window_size as usize - 1;
     if l % 2 == 0 {
         return Err(anyhow::anyhow!(
             "Constraint violated: k + w - 1 must be odd (k={}, w={})",
-            kmer_length,
-            window_size
+            config.kmer_length,
+            config.window_size
         ));
     }
 
     // Configure thread pool if specified (non-zero)
-    if threads > 0 {
+    if config.threads > 0 {
         rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
+            .num_threads(config.threads)
             .build_global()
             .context("Failed to initialize thread pool")?;
     }
 
-    // Create a fastx reader using needletail (handles gzip automatically)
-    let mut reader = parse_fastx_file(path).context("Failed to open input file")?;
+    // Use needletail for parsing
+    let mut reader = if path.to_string_lossy() == "-" {
+        parse_fastx_stdin().context("Failed to parse stdin")?
+    } else {
+        parse_fastx_file(path).context("Failed to open input file")?
+    };
 
     // Init FxHashSet with user-specified capacity
-    let capacity = capacity_millions * 1_000_000;
+    let capacity = config.capacity_millions * 1_000_000;
     let mut all_minimizers: FxHashSet<u64> =
         FxHashSet::with_capacity_and_hasher(capacity, Default::default());
 
@@ -252,7 +259,12 @@ pub fn build(
             .par_iter()
             .map(|(seq_data, _id)| {
                 // Compute minimizer hashes for this sequence
-                crate::minimizers::compute_minimizer_hashes(seq_data, kmer_length, window_size)
+                crate::minimizers::compute_minimizer_hashes(
+                    seq_data,
+                    config.kmer_length,
+                    config.window_size,
+                    config.entropy_threshold,
+                )
             })
             .collect();
 
@@ -265,13 +277,15 @@ pub fn build(
             seq_count += 1;
             total_bp += seq_data.len();
 
-            let id_str = std::str::from_utf8(id).unwrap_or("unknown");
-            eprintln!(
-                "  {} ({}bp), total minimizers: {}",
-                id_str,
-                seq_data.len(),
-                all_minimizers.len()
-            );
+            if !config.quiet {
+                let id_str = std::str::from_utf8(id).unwrap_or("unknown");
+                eprintln!(
+                    "  {} ({}bp), total minimizers: {}",
+                    id_str,
+                    seq_data.len(),
+                    all_minimizers.len()
+                );
+            }
         }
 
         // Check if we've reached the end of the file
@@ -287,10 +301,10 @@ pub fn build(
         total_bp
     );
 
-    let header = IndexHeader::new(kmer_length, window_size);
+    let header = IndexHeader::new(config.kmer_length, config.window_size);
 
     // Write to output path or stdout
-    write_minimizers(&all_minimizers, &header, output.as_ref())?;
+    write_minimizers(&all_minimizers, &header, config.output_path.as_ref())?;
 
     let total_time = start_time.elapsed();
     eprintln!("Completed in {total_time:.2?}");
@@ -323,9 +337,9 @@ fn stream_diff_fastx(
         eprintln!("Second index: processing FASTX from file (k={kmer_length}, w={window_size})…");
     }
 
-    // Create a fastx reader
+    // Use needletail for parsing
     let mut reader = if path.to_string_lossy() == "-" {
-        parse_fastx_stdin().context("Failed to parse FASTX from stdin")?
+        parse_fastx_stdin().context("Failed to parse stdin")?
     } else {
         parse_fastx_file(path).context("Failed to open FASTX file")?
     };
@@ -368,7 +382,7 @@ fn stream_diff_fastx(
             .par_iter()
             .map(|(seq_data, _id)| {
                 // Compute minimizer hashes for this sequence
-                crate::minimizers::compute_minimizer_hashes(seq_data, kmer_length, window_size)
+                crate::minimizers::compute_minimizer_hashes(seq_data, kmer_length, window_size, 0.0)
             })
             .collect();
 
@@ -403,7 +417,7 @@ fn stream_diff_fastx(
 
     eprintln!("Processed {seq_count} sequences ({total_bp}bp) from FASTX file");
 
-    Ok((seq_count, total_bp))
+    Ok((seq_count as usize, total_bp))
 }
 
 /// Compute the set difference between two minimizer indexes (A - B)
@@ -477,10 +491,6 @@ pub fn diff(
             // Use k and w from first index header and do a streaming diff
             let k = header.kmer_length();
             let w = header.window_size();
-            // eprintln!(
-            //     "Second index is not valid, treating as FASTX and extracting minimizers (k={}, w={})",
-            //     k, w
-            // );
 
             // Count minimizers before diff
             let before_count = first_minimizers.len();
@@ -563,13 +573,20 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
 
     // Read all headers first to determine total capacity needed
     let mut headers_and_counts = Vec::new();
-    let mut total_capacity = 0;
+    let mut sum_capacity = 0;
 
     for path in inputs {
         let (header, count) = load_header_and_count(path)?;
-        total_capacity += count;
+        sum_capacity += count;
         headers_and_counts.push((header, count));
     }
+
+    // Use provided capacity or fall back to sum of all index counts
+    let total_capacity = if let Some(capacity_millions) = capacity_millions {
+        capacity_millions * 1_000_000
+    } else {
+        sum_capacity
+    };
 
     // Get header from first file for output
     let header = &headers_and_counts[0].0;
@@ -579,11 +596,15 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
         header.kmer_length(),
         header.window_size()
     );
-    eprintln!(
-        "Pre-allocating capacity for {} minimizers across {} indexes",
-        total_capacity,
-        inputs.len()
-    );
+    if capacity_millions.is_some() {
+        eprintln!("Pre-allocating user-specified capacity for {total_capacity} minimizers");
+    } else {
+        eprintln!(
+            "No capacity specified, pre-allocating worst-case capacity for {} minimizers from {} indexes",
+            total_capacity,
+            inputs.len()
+        );
+    }
 
     // Verify all headers are compatible
     for (i, (file_header, _)) in headers_and_counts.iter().enumerate() {
