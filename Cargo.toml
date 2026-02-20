@@ -39,7 +39,6 @@ minreq = { version = "2", features = ["https-rustls-probe"] }
 
 
 
-itertools = "0.14.0"
 tokio = { version = "1.47.0", features = ["full"], optional = true }
 axum = { version = "0.8.4", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "registry", "json"], optional = true }
@@ -55,7 +54,7 @@ rstest = "0.25"
 rand = "0.9.2"
 
 [features]
-default = ["server"]
+default = []
 server = ["dep:tokio", "dep:axum", "dep:tracing-subscriber", "dep:reqwest", "dep:sha256"]
 
 [[test]]

@@ -40,9 +40,13 @@ enum Commands {
         #[arg(short = 'O', long = "output2")]
         output2: Option<String>,
 
-        /// Mininum number (integer) or proportion (float) of minimizer hits for a match
-        #[arg(short = 'm', long = "matches", default_value_t = MatchThreshold::Absolute(2))]
-        match_threshold: MatchThreshold,
+        /// Minimum absolute number of minimizer hits for a match
+        #[arg(short = 'a', long = "abs-threshold", default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..))]
+        abs_threshold: u8,
+
+        /// Minimum relative proportion (0.0-1.0) of minimizer hits for a match
+        #[arg(short = 'r', long = "rel-threshold", default_value_t = 0.01)]
+        rel_threshold: f64,
 
         /// Search only the first N nucleotides per sequence (0 = entire sequence)
         #[arg(short = 'p', long = "prefix-length", default_value_t = 0)]
@@ -67,6 +71,10 @@ enum Commands {
         /// Output compression level (1-9 for gz & xz; 1-22 for zstd)
         #[arg(long = "compression-level", default_value_t = 2)]
         compression_level: u8,
+
+        /// Output sequences with minimizer hits to stderr
+        #[arg(long = "debug", default_value_t = false)]
+        debug: bool,
     },
 
     Server {
@@ -100,9 +108,13 @@ enum Commands {
         #[arg(short = 'O', long = "output2")]
         output2: Option<String>,
 
-        /// Mininum number (integer) or proportion (float) of minimizer hits for a match
-        #[arg(short = 'm', long = "matches", default_value_t = MatchThreshold::Absolute(2))]
-        match_threshold: MatchThreshold,
+        /// Minimum absolute number of minimizer hits for a match
+        #[arg(short = 'a', long = "abs-threshold", default_value_t = 2, value_parser = clap::value_parser!(u8).range(1..))]
+        abs_threshold: u8,
+
+        /// Minimum relative proportion (0.0-1.0) of minimizer hits for a match
+        #[arg(short = 'r', long = "rel-threshold", default_value_t = 0.01)]
+        rel_threshold: f64,
 
         /// Search only the first N nucleotides per sequence (0 = entire sequence)
         #[arg(short = 'p', long = "prefix-length", default_value_t = 0)]
@@ -127,6 +139,10 @@ enum Commands {
         /// Output compression level (1-9 for gz & xz; 1-22 for zstd)
         #[arg(long = "compression-level", default_value_t = 2)]
         compression_level: u8,
+
+        /// Output sequences with minimizer hits to stderr
+        #[arg(long = "debug", default_value_t = false)]
+        debug: bool,
     },
 }
 
@@ -323,13 +339,15 @@ fn main() -> Result<()> {
             input2,
             output,
             output2,
-            match_threshold,
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             summary,
             deplete,
             rename,
             threads,
             compression_level,
+            debug,
         } => {
             // Validate output2 usage
             if output2.is_some() && input2.is_none() {
@@ -344,7 +362,8 @@ fn main() -> Result<()> {
                 input2.as_deref(),
                 output,
                 output2.as_deref(),
-                match_threshold,
+                *abs_threshold as usize,
+                *rel_threshold,
                 *prefix_length,
                 summary.as_ref(),
                 *deplete,
@@ -352,6 +371,7 @@ fn main() -> Result<()> {
                 *threads,
                 *compression_level,
                 None,
+                *debug,
             )
             .context("Failed to run filter command")?;
         }
@@ -381,13 +401,15 @@ fn main() -> Result<()> {
             input2,
             output,
             output2,
-            match_threshold,
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             summary,
             deplete,
             rename,
             threads,
             compression_level,
+            debug,
         } => {
             #[cfg(feature = "server")]
             {
@@ -406,7 +428,8 @@ fn main() -> Result<()> {
                     input2.as_deref(),
                     output,
                     output2.as_deref(),
-                    match_threshold,
+                    *abs_threshold as usize,
+                    *rel_threshold,
                     *prefix_length,
                     summary.as_ref(),
                     *deplete,
@@ -414,6 +437,7 @@ fn main() -> Result<()> {
                     *threads,
                     *compression_level,
                     Some(server_address.to_string()),
+                    *debug,
                 )
                 .context("Failed to run filter with client functionality")?;
             }
@@ -429,13 +453,15 @@ fn main() -> Result<()> {
                     input2,
                     output,
                     output2,
-                    match_threshold,
+                    abs_threshold,
+                    rel_threshold,
                     prefix_length,
                     summary,
                     deplete,
                     rename,
                     threads,
                     compression_level,
+                    debug,
                 );
                 std::process::exit(1);
             }

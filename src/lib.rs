@@ -25,8 +25,7 @@ pub use index::{
     dump as index_dump, dump_minimizers, info as index_info, intersect as index_intersect,
     load_minimizers, union as index_union,
 };
-pub use minimizers::{DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE}; //, compute_minimizer_hashes, fill_minimizer_hashes,
-// };
+pub use minimizers::{DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE};
 
 use anyhow::Result;
 use std::collections::HashSet;
@@ -194,8 +193,11 @@ pub struct FilterConfig {
     /// Path to optional second output fastx file for paired reads (detects .gz and .zst)
     pub output2_path: Option<String>,
 
-    /// Match threshold for filtering sequences
-    pub match_threshold: MatchThreshold,
+    /// Absolute threshold for filtering sequences
+    pub abs_threshold: usize,
+
+    /// Relative threshold for filtering sequences (0.0-1.0)
+    pub rel_threshold: f64,
 
     /// Consider only the first N nucleotides per sequence (0 = entire sequence)
     pub prefix_length: usize,
@@ -214,6 +216,9 @@ pub struct FilterConfig {
 
     /// Compression level for output files (1-22 for zst, 1-9 for gz)
     pub compression_level: u8,
+
+    /// Enable debug output of hit kmers
+    pub debug: bool,
 }
 
 impl FilterConfig {
@@ -224,13 +229,15 @@ impl FilterConfig {
             input2_path: None,
             output_path: "-".to_string(),
             output2_path: None,
-            match_threshold: MatchThreshold::Absolute(2),
+            abs_threshold: 0,
+            rel_threshold: 0.0,
             prefix_length: 0,
             summary_path: None,
             deplete: false,
             rename: false,
             threads: 0,           // Use all available threads by default
             compression_level: 2, // Default compression level
+            debug: false,
         }
     }
 
@@ -254,8 +261,13 @@ impl FilterConfig {
         self
     }
 
-    pub fn with_match_threshold(mut self, match_threshold: MatchThreshold) -> Self {
-        self.match_threshold = match_threshold;
+    pub fn with_abs_threshold(mut self, abs_threshold: usize) -> Self {
+        self.abs_threshold = abs_threshold;
+        self
+    }
+
+    pub fn with_rel_threshold(mut self, rel_threshold: f64) -> Self {
+        self.rel_threshold = rel_threshold;
         self
     }
 
@@ -289,6 +301,11 @@ impl FilterConfig {
         self
     }
 
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
     /// Filter with this configuration
     pub fn execute(&self) -> Result<()> {
         filter::run(
@@ -297,7 +314,8 @@ impl FilterConfig {
             self.input2_path.as_deref(),
             &self.output_path,
             self.output2_path.as_deref(),
-            &self.match_threshold,
+            self.abs_threshold,
+            self.rel_threshold,
             self.prefix_length,
             self.summary_path.as_ref(),
             self.deplete,
@@ -305,6 +323,7 @@ impl FilterConfig {
             self.threads,
             self.compression_level,
             None,
+            self.debug,
         )
     }
 }

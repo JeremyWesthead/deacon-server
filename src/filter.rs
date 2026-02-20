@@ -1,6 +1,8 @@
-use crate::MatchThreshold;
 use crate::MinimizerSet;
 use crate::index::load_minimizers_cached;
+use crate::minimizers::KmerHasher;
+use crate::minimizers::decode_u64;
+use crate::minimizers::decode_u128;
 // use crate::index::load_minimizer_hashes;
 // use crate::minimizers::fill_minimizer_hashes;
 #[cfg(feature = "server")]
@@ -9,11 +11,11 @@ use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use itertools::Itertools;
 use liblzma::write::XzEncoder;
 use needletail::parse_fastx_file;
 use needletail::parse_fastx_stdin;
 use needletail::parser::Format;
+use packed_seq::SeqVec;
 use packed_seq::{PackedNSeqVec, u32x8};
 use rayon::prelude::*;
 #[cfg(feature = "server")]
@@ -282,9 +284,10 @@ pub struct FilterSummary {
     input2: Option<String>,
     output: String,
     output2: Option<String>,
-    k: usize,
-    w: usize,
-    match_threshold: String,
+    k: u8,
+    w: u8,
+    abs_threshold: usize,
+    rel_threshold: f64,
     prefix_length: usize,
     deplete: bool,
     rename: bool,
@@ -303,176 +306,426 @@ pub struct FilterSummary {
     bp_per_second: u64,
 }
 
-/// Determine if a given set of minimizers should be output
-pub fn input_should_be_output(
-    index_minimizers: &MinimizerSet,
-    input_minimizers: &Vec<u64>,
-    match_threshold: &MatchThreshold,
+/// Calculate required hits based on absolute and relative thresholds
+fn calculate_required_hits(
+    total_minimizers: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
+) -> usize {
+    let abs_required = abs_threshold;
+    let rel_required = if total_minimizers == 0 {
+        0
+    } else {
+        ((rel_threshold * total_minimizers as f64).round() as usize).max(1)
+    };
+    abs_required.max(rel_required)
+}
+
+/// Check if sequence meets filtering criteria
+fn meets_filtering_criteria(
+    hit_count: usize,
+    total_minimizers: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
     deplete: bool,
 ) -> bool {
-    // Count distinct minimizer hits
-    // let mut seen_hits: = FxHashSet::default();
-    let mut hit_count = 0;
-    for &hash in input_minimizers {
-        // if index_minimizers.contains(&hash) && seen_hits.insert(hash) {
-        //     hit_count += 1;
-        // }
+    let required = calculate_required_hits(total_minimizers, abs_threshold, rel_threshold);
+    if deplete {
+        hit_count < required
+    } else {
+        hit_count >= required
+    }
+}
+
+fn get_minimizer_positions_and_values<'s>(
+    seq: &'s [u8],
+    mut buffers: Buffers,
+    prefix_length: usize,
+    kmer_length: u8,
+    window_size: u8,
+    hasher: KmerHasher,
+) -> Buffers {
+    // Apply prefix length limit if specified.
+    let seq = if prefix_length > 0 && seq.len() > prefix_length {
+        &seq[..prefix_length]
+    } else {
+        seq
+    };
+    // Drop trailing newline if present.
+    let seq = seq.strip_suffix(b"\n").unwrap_or(seq);
+
+    let Buffers {
+        packed_nseq,
+        positions,
+        minimizers,
+        cache,
+    } = &mut buffers;
+
+    packed_nseq.seq.clear();
+    packed_nseq.ambiguous.clear();
+    minimizers.clear();
+    positions.clear();
+
+    // Pack the sequence into 2-bit representation.
+    packed_nseq.seq.push_ascii(seq);
+    packed_nseq.ambiguous.push_ascii(seq);
+
+    // let mut positions = Vec::new();
+    let k = kmer_length as usize;
+    let w = window_size as usize;
+    let m = simd_minimizers::canonical_minimizers(k, w)
+        .hasher(&hasher)
+        .run_skip_ambiguous_windows_with_buf(packed_nseq.as_slice(), positions, cache);
+
+    // Store k-mer values directly based on variant
+    match minimizers {
+        crate::MinimizerVec::U64(vec) => {
+            vec.extend(m.pos_and_values_u64().map(|(_pos, val)| val));
+        }
+        crate::MinimizerVec::U128(vec) => {
+            vec.extend(m.pos_and_values_u128().map(|(_pos, val)| val));
+        }
     }
 
-    // Convert threshold to absolute count
-    let required_hits = match match_threshold {
-        MatchThreshold::Absolute(n) => *n,
-        MatchThreshold::Relative(f) => {
-            if input_minimizers.is_empty() {
-                0
-            } else {
-                ((*f * input_minimizers.len() as f64).ceil() as usize).max(1)
-            }
-        }
+    buffers
+}
+
+fn should_keep_sequence(
+    ref_minimizers: &MinimizerSet,
+    seq: &[u8],
+    kmer_length: u8,
+    window_size: u8,
+    prefix_length: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
+    deplete: bool,
+    debug: bool,
+) -> (bool, usize, usize, Vec<String>) {
+    if seq.len() < kmer_length as usize {
+        return (deplete, 0, 0, Vec::new()); // If too short, keep if in deplete mode
+    }
+
+    let hasher = KmerHasher::new(kmer_length as usize);
+    let buffers = if kmer_length <= 32 {
+        Buffers::new_u64()
+    } else {
+        Buffers::new_u128()
     };
 
-    if deplete {
-        // Deplete mode: remove pairs that meet the threshold
-        hit_count < required_hits
-    } else {
-        // Default mode: keep pairs that meet the threshold
-        hit_count >= required_hits
-    }
+    let buffers = get_minimizer_positions_and_values(
+        seq,
+        buffers,
+        prefix_length,
+        kmer_length,
+        window_size,
+        hasher,
+    );
+    let minimizers = &buffers.minimizers;
+    let num_minimizers = minimizers.len();
+
+    // Count distinct minimizer hits based on variant
+    let (hit_count, hit_kmers) = match (minimizers, ref_minimizers) {
+        (crate::MinimizerVec::U64(vec), MinimizerSet::U64(set)) => {
+            let mut seen_hits = crate::RapidHashSet::default();
+            let mut hit_kmers = Vec::new();
+            for &minimizer in vec {
+                if set.contains(&minimizer) && seen_hits.insert(minimizer) {
+                    if debug {
+                        let kmer = decode_u64(minimizer, kmer_length);
+                        hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
+                    }
+                }
+            }
+            (seen_hits.len(), hit_kmers)
+        }
+        (crate::MinimizerVec::U128(vec), MinimizerSet::U128(set)) => {
+            let mut seen_hits = crate::RapidHashSet::default();
+            let mut hit_kmers = Vec::new();
+            for &minimizer in vec {
+                if set.contains(&minimizer) && seen_hits.insert(minimizer) {
+                    if debug {
+                        let kmer = decode_u128(minimizer, kmer_length);
+                        hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
+                    }
+                }
+            }
+            (seen_hits.len(), hit_kmers)
+        }
+        _ => panic!("Mismatch between MinimizerVec and MinimizerSet types"),
+    };
+
+    (
+        meets_filtering_criteria(
+            hit_count,
+            num_minimizers,
+            abs_threshold,
+            rel_threshold,
+            deplete,
+        ),
+        hit_count,
+        num_minimizers,
+        hit_kmers,
+    )
+}
+
+fn should_keep_pair(
+    ref_minimizers: &MinimizerSet,
+    seq1: &[u8],
+    seq2: &[u8],
+    kmer_length: u8,
+    window_size: u8,
+    prefix_length: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
+    deplete: bool,
+    debug: bool,
+) -> (bool, usize, usize, Vec<String>) {
+    // Process both sequences and count distinct hits
+    let (_, hit_count1, num_minimizers1, hit_kmers1) = should_keep_sequence(
+        ref_minimizers,
+        seq1,
+        kmer_length,
+        window_size,
+        prefix_length,
+        abs_threshold,
+        rel_threshold,
+        deplete,
+        debug,
+    );
+    let (_, hit_count2, num_minimizers2, hit_kmers2) = should_keep_sequence(
+        ref_minimizers,
+        seq2,
+        kmer_length,
+        window_size,
+        prefix_length,
+        abs_threshold,
+        rel_threshold,
+        deplete,
+        debug,
+    );
+
+    let hit_count = hit_count1 + hit_count2;
+    let num_minimizers = num_minimizers1 + num_minimizers2;
+    let hit_kmers = [hit_kmers1, hit_kmers2].concat();
+
+    (
+        meets_filtering_criteria(
+            hit_count,
+            num_minimizers,
+            abs_threshold,
+            rel_threshold,
+            deplete,
+        ),
+        hit_count,
+        num_minimizers,
+        hit_kmers,
+    )
 }
 
 /// Given a set of index minimizers and a vector of input minimizers,
 /// return a vector of booleans indicating whether each input should be output
 pub fn inputs_should_be_output(
     index_minimizers: &MinimizerSet,
-    input_minimizers: &Vec<Vec<u64>>,
-    match_threshold: &MatchThreshold,
+    seqs: &Vec<&[u8]>,
+    kmer_length: u8,
+    window_size: u8,
+    prefix_length: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
     deplete: bool,
-) -> Vec<bool> {
-    input_minimizers
-        .par_iter()
-        .map(|minimizers| {
-            input_should_be_output(index_minimizers, minimizers, match_threshold, deplete)
+    debug: bool,
+) -> Vec<(bool, Vec<String>, usize)> {
+    seqs.par_iter()
+        .map(|seq| {
+            let (keep, _, _, hit_kmers) = should_keep_sequence(
+                index_minimizers,
+                seq,
+                kmer_length,
+                window_size,
+                prefix_length,
+                abs_threshold,
+                rel_threshold,
+                deplete,
+                debug,
+            );
+
+            (keep, hit_kmers, seq.len())
         })
         .collect()
 }
 
-/// Send minimizers to server for checking against index.
-/// Equivalent functionality to `inputs_should_be_output`, but remote
-#[cfg(feature = "server")]
-fn send_all_minimizers_to_server(
-    input_minimizers: Vec<Vec<u64>>,
-    server_address: &str,
-    matches_threshold: &MatchThreshold,
+/// Given a set of index minimizers and a vector of input minimizers,
+/// return a vector of booleans indicating whether each input should be output
+pub fn paired_inputs_should_be_output(
+    index_minimizers: &MinimizerSet,
+    seqs: &Vec<(&[u8], &[u8])>,
+    kmer_length: u8,
+    window_size: u8,
+    prefix_length: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
     deplete: bool,
-) -> Result<Vec<bool>> {
-    // Create a client to send the minimizers to the server
-    let client = Client::new();
+    debug: bool,
+) -> Vec<(bool, Vec<String>, usize, usize)> {
+    seqs.par_iter()
+        .map(|seq| {
+            let (keep, _, _, hit_kmers) = should_keep_pair(
+                index_minimizers,
+                seq.0,
+                seq.1,
+                kmer_length,
+                window_size,
+                prefix_length,
+                abs_threshold,
+                rel_threshold,
+                deplete,
+                debug,
+            );
 
-    // Send the minimizers as a POST request
-    let response = client
-        .post(server_address.to_owned() + "/should_output")
-        .json(&FilterRequest {
-            input: input_minimizers,
-            match_threshold: *matches_threshold,
-            deplete,
+            (keep, hit_kmers, seq.0.len(), seq.1.len())
         })
-        .send()?;
-
-    // Check if the response indicates a match
-    if response.status().is_success() {
-        Ok(response.json::<FilterResponse>()?.should_output)
-    } else {
-        Err(anyhow::anyhow!(
-            "Server returned an error: {}",
-            response.status()
-        ))
-    }
+        .collect()
 }
+
+// /// Send minimizers to server for checking against index.
+// /// Equivalent functionality to `inputs_should_be_output`, but remote
+// #[cfg(feature = "server")]
+// fn send_all_minimizers_to_server(
+//     input_minimizers: Vec<Vec<u64>>,
+//     server_address: &str,
+//     matches_threshold: &MatchThreshold,
+//     deplete: bool,
+// ) -> Result<Vec<bool>> {
+//     // Create a client to send the minimizers to the server
+//     let client = Client::new();
+
+//     // Send the minimizers as a POST request
+//     let response = client
+//         .post(server_address.to_owned() + "/should_output")
+//         .json(&FilterRequest {
+//             input: input_minimizers,
+//             match_threshold: *matches_threshold,
+//             deplete,
+//         })
+//         .send()?;
+
+//     // Check if the response indicates a match
+//     if response.status().is_success() {
+//         Ok(response.json::<FilterResponse>()?.should_output)
+//     } else {
+//         Err(anyhow::anyhow!(
+//             "Server returned an error: {}",
+//             response.status()
+//         ))
+//     }
+// }
 
 /// Given a set of input minimizers, check if they should be output
 /// If index minimizers are provided, check locally.
 /// If not, send to server for checking. Requires the `server` feature to be enabled.
 pub fn check_inputs_should_be_output(
     index_minimizers: &Option<MinimizerSet>,
-    input_minimizers: &Vec<Vec<u64>>,
-    match_threshold: &MatchThreshold,
+    seqs: &Vec<&[u8]>,
+    kmer_length: u8,
+    window_size: u8,
+    prefix_length: usize,
+    abs_threshold: usize,
+    rel_threshold: f64,
     _server_address: &Option<String>,
     deplete: bool,
-) -> Vec<bool> {
+    debug: bool,
+) -> Vec<(bool, Vec<String>, usize)> {
     // If index minimizers are provided, check if input matches locally
     if let Some(index_minimizers) = index_minimizers {
-        inputs_should_be_output(index_minimizers, input_minimizers, match_threshold, deplete)
+        inputs_should_be_output(
+            index_minimizers,
+            seqs,
+            kmer_length,
+            window_size,
+            prefix_length,
+            abs_threshold,
+            rel_threshold,
+            deplete,
+            debug,
+        )
     } else {
         // Else, send the input minimizers to the server for checking
-        #[cfg(feature = "server")]
-        {
-            if _server_address.is_none() {
-                panic!("Server address is required when using the server feature.");
-            }
-            let server_address = _server_address.as_ref().map(String::as_str).unwrap();
-            send_all_minimizers_to_server(
-                input_minimizers.to_vec(),
-                server_address,
-                match_threshold,
-                deplete,
-            )
-            .unwrap_or_else(|e| {
-                panic!("Error checking input against index: {e}");
-            })
-        }
-        #[cfg(not(feature = "server"))]
-        {
-            panic!("Server feature is not enabled. Cannot check input against index.");
-        }
+        // #[cfg(feature = "server")]
+        // {
+        //     if _server_address.is_none() {
+        //         panic!("Server address is required when using the server feature.");
+        //     }
+        //     let server_address = _server_address.as_ref().map(String::as_str).unwrap();
+        //     send_all_minimizers_to_server(
+        //         input_minimizers.to_vec(),
+        //         server_address,
+        //         match_threshold,
+        //         deplete,
+        //     )
+        //     .unwrap_or_else(|e| {
+        //         panic!("Error checking input against index: {e}");
+        //     })
+        // }
+        // #[cfg(not(feature = "server"))]
+        // {
+        //     panic!("Server feature is not enabled. Cannot check input against index.");
+        // }
+        Vec::new()
     }
 }
 
-/// Get minimizer hashes from a single record.
-fn get_hashes_from_record(
-    record_data: &RecordData,
-    kmer_length: usize,
+/// Given a set of input minimizers, check if they should be output
+/// If index minimizers are provided, check locally.
+/// If not, send to server for checking. Requires the `server` feature to be enabled.
+pub fn check_paired_inputs_should_be_output(
+    index_minimizers: &Option<MinimizerSet>,
+    seqs: &Vec<(&[u8], &[u8])>,
+    kmer_length: u8,
+    window_size: u8,
     prefix_length: usize,
-    window_size: usize,
-) -> (Vec<u64>, usize) {
-    let seq_len = record_data.seq.len();
-    let mut minimizer_buffer = Vec::with_capacity(64);
-
-    if seq_len >= kmer_length {
-        // Apply prefix length limit if specified
-        let effective_seq = if prefix_length > 0 && seq_len > prefix_length {
-            &record_data.seq[..prefix_length]
-        } else {
-            &record_data.seq
-        };
-
-        // Get minimizer hash values using parameters from header
-        // fill_minimizer_hashes(
-        //     effective_seq,
-        //     kmer_length,
-        //     window_size,
-        //     &mut minimizer_buffer,
-        // );
+    abs_threshold: usize,
+    rel_threshold: f64,
+    _server_address: &Option<String>,
+    deplete: bool,
+    debug: bool,
+) -> Vec<(bool, Vec<String>, usize, usize)> {
+    // If index minimizers are provided, check if input matches locally
+    if let Some(index_minimizers) = index_minimizers {
+        paired_inputs_should_be_output(
+            index_minimizers,
+            seqs,
+            kmer_length,
+            window_size,
+            prefix_length,
+            abs_threshold,
+            rel_threshold,
+            deplete,
+            debug,
+        )
+    } else {
+        // Else, send the input minimizers to the server for checking
+        // #[cfg(feature = "server")]
+        // {
+        //     if _server_address.is_none() {
+        //         panic!("Server address is required when using the server feature.");
+        //     }
+        //     let server_address = _server_address.as_ref().map(String::as_str).unwrap();
+        //     send_all_minimizers_to_server(
+        //         input_minimizers.to_vec(),
+        //         server_address,
+        //         match_threshold,
+        //         deplete,
+        //     )
+        //     .unwrap_or_else(|e| {
+        //         panic!("Error checking input against index: {e}");
+        //     })
+        // }
+        // #[cfg(not(feature = "server"))]
+        // {
+        //     panic!("Server feature is not enabled. Cannot check input against index.");
+        // }
+        Vec::new()
     }
-
-    (minimizer_buffer, seq_len)
-}
-
-/// Get minimizer hashes from a pair of records.
-fn get_hashes_from_record_pair(
-    record_data1: &RecordData,
-    record_data2: &RecordData,
-    kmer_length: usize,
-    prefix_length: usize,
-    window_size: usize,
-) -> (Vec<u64>, usize, usize) {
-    let (mut minimizer_buffer1, seq1_len) =
-        get_hashes_from_record(record_data1, kmer_length, prefix_length, window_size);
-    let (mut minimizer_buffer2, seq2_len) =
-        get_hashes_from_record(record_data2, kmer_length, prefix_length, window_size);
-    // Combine the two minimizer buffers
-    minimizer_buffer1.append(&mut minimizer_buffer2);
-
-    (minimizer_buffer1, seq1_len, seq2_len)
 }
 
 /// Run deacon filter with the provided parameters.
@@ -483,7 +736,8 @@ pub fn run(
     input2_path: Option<&str>,
     output_path: &str,
     output2_path: Option<&str>,
-    match_threshold: &MatchThreshold,
+    abs_threshold: usize,
+    rel_threshold: f64,
     prefix_length: usize,
     summary_path: Option<&PathBuf>,
     deplete: bool,
@@ -491,6 +745,7 @@ pub fn run(
     threads: usize,
     compression_level: u8,
     server_address: Option<String>,
+    debug: bool,
 ) -> Result<()> {
     let start_time = Instant::now();
     let version: String = env!("CARGO_PKG_VERSION").to_string();
@@ -516,7 +771,8 @@ pub fn run(
     } else {
         input_type.push_str("single");
     }
-    options.push(format!("match_threshold={match_threshold}"));
+    options.push(format!("abs_threshold={abs_threshold}"));
+    options.push(format!("rel_threshold={rel_threshold:.3}"));
     if prefix_length > 0 {
         options.push(format!("prefix_length={prefix_length}"));
     }
@@ -538,11 +794,8 @@ pub fn run(
     // Load minimizers hashes and parse header
     let (minimizer_hashes, header) = load_minimizers_cached(minimizers_path, &server_address)?;
 
-    // let kmer_length = header.kmer_length();
-    // let window_size = header.window_size();
-    let minimizer_hashes = None;
-    let kmer_length = 15;
-    let window_size = 15;
+    let kmer_length = header.kmer_length();
+    let window_size = header.window_size();
 
     let load_time = start_time.elapsed();
     eprintln!("Loaded index (k={kmer_length}, w={window_size}) in {load_time:.2?}");
@@ -581,7 +834,8 @@ pub fn run(
             &minimizer_hashes,
             &mut writer,
             writer2.as_mut(),
-            match_threshold,
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             kmer_length,
             window_size,
@@ -596,6 +850,7 @@ pub fn run(
             &spinner,
             filtering_start_time,
             &server_address,
+            debug,
         )?;
     } else if let Some(input2_path) = input2_path {
         process_paired_seqs(
@@ -604,7 +859,8 @@ pub fn run(
             input2_path,
             &mut writer,
             writer2.as_mut(),
-            match_threshold,
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             kmer_length,
             window_size,
@@ -619,13 +875,15 @@ pub fn run(
             &spinner,
             filtering_start_time,
             &server_address,
+            debug,
         )?;
     } else {
         process_single_seqs(
             &minimizer_hashes,
             input_path,
             &mut writer,
-            match_threshold,
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             kmer_length,
             window_size,
@@ -640,6 +898,7 @@ pub fn run(
             &spinner,
             filtering_start_time,
             &server_address,
+            debug,
         )?;
     }
 
@@ -712,7 +971,8 @@ pub fn run(
             output2: output2_path.map(|s| s.to_string()),
             k: kmer_length,
             w: window_size,
-            match_threshold: match_threshold.to_string(),
+            abs_threshold,
+            rel_threshold,
             prefix_length,
             deplete,
             rename,
@@ -786,10 +1046,11 @@ fn process_single_seqs(
     minimizer_hashes: &Option<MinimizerSet>,
     input_path: &str,
     writer: &mut Box<dyn FastxWriter>,
-    match_threshold: &MatchThreshold,
+    abs_threshold: usize,
+    rel_threshold: f64,
     prefix_length: usize,
-    kmer_length: usize,
-    window_size: usize,
+    kmer_length: u8,
+    window_size: u8,
     deplete: bool,
     rename: bool,
     total_seqs: &mut u64,
@@ -801,6 +1062,7 @@ fn process_single_seqs(
     spinner: &ProgressBar,
     filtering_start_time: Instant,
     server_address: &Option<String>,
+    debug: bool,
 ) -> Result<()> {
     // Create a reader based on the input source
     let mut reader = if input_path == "-" {
@@ -844,31 +1106,40 @@ fn process_single_seqs(
             break;
         }
 
-        // Get batch minimizers in parallel
-        let (batch_minimizers, seq_lens): (Vec<Vec<u64>>, Vec<usize>) = batch
-            .par_iter()
-            .map(|record_data| {
-                get_hashes_from_record(record_data, kmer_length, prefix_length, window_size)
-            })
-            .unzip();
-
         // Check if minimizers match the index
         // Separated from initial par_iter to allow flexibility with local/server processing
         let batch_should_outputs = check_inputs_should_be_output(
             minimizer_hashes,
-            &batch_minimizers,
-            match_threshold,
+            &batch
+                .iter()
+                .map(|record_data| record_data.seq.as_slice())
+                .collect(),
+            kmer_length,
+            window_size,
+            prefix_length,
+            abs_threshold,
+            rel_threshold,
             server_address,
             deplete,
+            debug,
         );
 
         // Process results sequentially to maintain order
-        for (i, (seq_len, should_output)) in seq_lens.iter().zip(batch_should_outputs).enumerate() {
+        for (i, (should_output, kmer_hits, seq_len)) in batch_should_outputs.iter().enumerate() {
             let record_data = &batch[i];
             *total_seqs += 1;
             *total_bp += *seq_len as u64;
 
-            if should_output {
+            if debug && kmer_hits.len() > 0 {
+                eprintln!(
+                    "DEBUG: {} keep={} kmers=[{}]",
+                    String::from_utf8_lossy(&record_data.id),
+                    should_output,
+                    kmer_hits.join(",")
+                );
+            }
+
+            if *should_output {
                 // Track output base pairs
                 *output_bp += *seq_len as u64;
 
@@ -947,10 +1218,11 @@ fn process_paired_seqs(
     input2_path: &str,
     writer: &mut Box<dyn FastxWriter>,
     mut writer2: Option<&mut Box<dyn FastxWriter>>,
-    match_threshold: &MatchThreshold,
+    abs_threshold: usize,
+    rel_threshold: f64,
     prefix_length: usize,
-    kmer_length: usize,
-    window_size: usize,
+    kmer_length: u8,
+    window_size: u8,
     deplete: bool,
     rename: bool,
     total_seqs: &mut u64,
@@ -962,6 +1234,7 @@ fn process_paired_seqs(
     spinner: &ProgressBar,
     filtering_start_time: Instant,
     server_address: &Option<String>,
+    debug: bool,
 ) -> Result<()> {
     // Open both input files
     let mut reader1 = if input1_path == "-" {
@@ -1016,46 +1289,45 @@ fn process_paired_seqs(
             break;
         }
 
-        // Get batch minimizers in parallel
-        let batch_result: Vec<(Vec<u64>, usize, usize)> = batch1
-            .par_iter()
-            .zip(batch2.par_iter())
-            .map(|(record_data1, record_data2)| {
-                get_hashes_from_record_pair(
-                    record_data1,
-                    record_data2,
-                    kmer_length,
-                    prefix_length,
-                    window_size,
-                )
-            })
-            .collect();
-
-        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
-            batch_result.into_iter().multiunzip();
-
         // Check if minimizers match the index
-        // Separated from initial par_iter to allow flexibility with local/server processing
-        let batch_should_outputs = check_inputs_should_be_output(
+        let batch_should_outputs = check_paired_inputs_should_be_output(
             minimizer_hashes,
-            &batch_minimizers,
-            match_threshold,
+            &batch1
+                .iter()
+                .zip(batch2.iter())
+                .map(|(record_data1, record_data2)| {
+                    (record_data1.seq.as_slice(), record_data2.seq.as_slice())
+                })
+                .collect(),
+            kmer_length,
+            window_size,
+            prefix_length,
+            abs_threshold,
+            rel_threshold,
             server_address,
             deplete,
+            debug,
         );
 
         // Process results sequentially to maintain order
-        for (i, ((should_output, seq1_len), seq2_len)) in batch_should_outputs
-            .iter()
-            .zip(seq_lens1)
-            .zip(seq_lens2)
-            .enumerate()
+        for (i, (should_output, kmer_hits, seq1_len, seq2_len)) in
+            batch_should_outputs.iter().enumerate()
         {
             let record_data1 = &batch1[i];
             let record_data2 = &batch2[i];
 
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
+
+            if debug && kmer_hits.len() > 0 {
+                eprintln!(
+                    "DEBUG: {} {} keep={} kmers=[{}]",
+                    String::from_utf8_lossy(&record_data1.id),
+                    String::from_utf8_lossy(&record_data2.id),
+                    should_output,
+                    kmer_hits.join(",")
+                );
+            }
 
             if *should_output {
                 // Track output base pairs
@@ -1171,10 +1443,11 @@ fn process_interleaved_paired_seqs(
     minimizer_hashes: &Option<MinimizerSet>,
     writer: &mut Box<dyn FastxWriter>,
     mut writer2: Option<&mut Box<dyn FastxWriter>>,
-    match_threshold: &MatchThreshold,
+    abs_threshold: usize,
+    rel_threshold: f64,
     prefix_length: usize,
-    kmer_length: usize,
-    window_size: usize,
+    kmer_length: u8,
+    window_size: u8,
     deplete: bool,
     rename: bool,
     total_seqs: &mut u64,
@@ -1186,6 +1459,7 @@ fn process_interleaved_paired_seqs(
     spinner: &ProgressBar,
     filtering_start_time: Instant,
     server_address: &Option<String>,
+    debug: bool,
 ) -> Result<()> {
     // Parse FASTX from stdin
     let mut reader = parse_fastx_stdin()?;
@@ -1261,45 +1535,44 @@ fn process_interleaved_paired_seqs(
             break;
         }
 
-        // Get batch minimizers in parallel
-        let batch_result: Vec<(Vec<u64>, usize, usize)> = batch_pairs
-            .par_iter()
-            .map(|(record_data1, record_data2)| {
-                get_hashes_from_record_pair(
-                    record_data1,
-                    record_data2,
-                    kmer_length,
-                    prefix_length,
-                    window_size,
-                )
-            })
-            .collect();
-
-        let (batch_minimizers, seq_lens1, seq_lens2): (Vec<Vec<u64>>, Vec<usize>, Vec<usize>) =
-            batch_result.into_iter().multiunzip();
-
         // Check if minimizers match the index
-        // Separated from initial par_iter to allow flexibility with local/server processing
-        let batch_should_outputs = check_inputs_should_be_output(
+        let batch_should_outputs = check_paired_inputs_should_be_output(
             minimizer_hashes,
-            &batch_minimizers,
-            match_threshold,
+            &batch_pairs
+                .iter()
+                .map(|(record_data1, record_data2)| {
+                    (record_data1.seq.as_slice(), record_data2.seq.as_slice())
+                })
+                .collect(),
+            kmer_length,
+            window_size,
+            prefix_length,
+            abs_threshold,
+            rel_threshold,
             server_address,
             deplete,
+            debug,
         );
 
         // Process results sequentially to maintain order
-        for (i, ((should_output, seq1_len), seq2_len)) in batch_should_outputs
-            .iter()
-            .zip(seq_lens1)
-            .zip(seq_lens2)
-            .enumerate()
+        for (i, (should_output, kmer_hits, seq1_len, seq2_len)) in
+            batch_should_outputs.iter().enumerate()
         {
             // for (i, result) in batch_results.into_iter().enumerate() {
             let (record1, record2) = &batch_pairs[i];
 
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
+
+            if debug && kmer_hits.len() > 0 {
+                eprintln!(
+                    "DEBUG: {} {} keep={} kmers=[{}]",
+                    String::from_utf8_lossy(&record1.id),
+                    String::from_utf8_lossy(&record2.id),
+                    should_output,
+                    kmer_hits.join(",")
+                );
+            }
 
             if *should_output {
                 // Track output base pairs
