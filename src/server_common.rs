@@ -1,28 +1,74 @@
 //! Common structures and types used in the client and server
-use crate::{IndexHeader, MatchThreshold};
+use crate::IndexHeader;
 use anyhow::Result;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
-/// Request structure for filtering minimizers
+/// Request structure for filtering sequences
 #[derive(Serialize, Deserialize)]
-pub struct FilterRequest {
-    /// Prehashed minimizers for input
-    pub input: Vec<Vec<u64>>,
+pub struct FilterSequencesRequest {
+    /// Sequences to filter
+    pub sequences: Vec<Vec<u8>>,
 
-    /// Mininum number (integer) or proportion (float) of minimizer hits for a match
-    pub match_threshold: MatchThreshold,
+    /// Absoulte filtering threshold
+    pub abs_threshold: usize,
+
+    /// Relative filtering threshold (proportion of minimizers that must match)
+    pub rel_threshold: f64,
+
+    /// Prefix length for minimizer computation
+    pub prefix_length: usize,
 
     /// Whether running in deplete mode
     pub deplete: bool,
+
+    /// Whether running in debug mode
+    pub debug: bool,
 }
 
-/// Response structure for filter results
-/// Returns whether this set of minimizers should be output
+/// Response structure for sequence filtering results
 #[derive(Serialize, Deserialize)]
-pub struct FilterResponse {
-    /// Indicates if the input minimizers should be output
-    pub should_output: Vec<bool>,
+pub struct FilterSequencesResponse {
+    /// Results for each sequence
+    /// Each tuple contains:
+    /// - A boolean indicating if the sequence should be output
+    /// - If running in debug mode, a vector of strings of matched kmers. Empty vector else.
+    /// - The length of the sequence
+    pub results: Vec<(bool, Vec<String>, usize)>,
+}
+
+/// Request structure for filtering paired sequences
+#[derive(Serialize, Deserialize)]
+pub struct FilterPairedSequencesRequest {
+    /// Sequences to filter
+    pub sequences: Vec<(Vec<u8>, Vec<u8>)>,
+
+    /// Absoulte filtering threshold
+    pub abs_threshold: usize,
+
+    /// Relative filtering threshold (proportion of minimizers that must match)
+    pub rel_threshold: f64,
+
+    /// Prefix length for minimizer computation
+    pub prefix_length: usize,
+
+    /// Whether running in deplete mode
+    pub deplete: bool,
+
+    /// Whether running in debug mode
+    pub debug: bool,
+}
+
+/// Response structure for sequence filtering paired results
+#[derive(Serialize, Deserialize)]
+pub struct FilterPairedSequencesResponse {
+    /// Results for each pair of sequences
+    /// Each tuple contains:
+    /// - A boolean indicating if the pair should be output
+    /// - If running in debug mode, a vector of strings of matched kmers. Empty vector else.
+    /// - The length of the first sequence
+    /// - The length of the second sequence
+    pub results: Vec<(bool, Vec<String>, usize, usize)>,
 }
 
 /// Get the header of the index loaded into a remote server

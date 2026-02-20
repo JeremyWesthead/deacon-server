@@ -31,7 +31,6 @@ use anyhow::Result;
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 /// BuildHasher using rapidhash with fixed seed for fast init
 #[derive(Clone, Default)]
@@ -137,42 +136,6 @@ impl MinimizerVec {
         match self {
             MinimizerVec::U64(v) => v.is_empty(),
             MinimizerVec::U128(v) => v.is_empty(),
-        }
-    }
-}
-
-/// Match threshold for filtering sequences.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum MatchThreshold {
-    Absolute(usize),
-    Relative(f64),
-}
-
-impl FromStr for MatchThreshold {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(val) = s.parse::<usize>() {
-            Ok(MatchThreshold::Absolute(val))
-        } else if let Ok(val) = s.parse::<f64>() {
-            if val.is_nan() || val.is_sign_negative() || val > 1.0 {
-                Err(format!("Relative threshold must be in [0, 1], got: {val}"))
-            } else {
-                Ok(MatchThreshold::Relative(val))
-            }
-        } else {
-            Err(format!(
-                "Invalid threshold format: '{s}'. Expected an integer or a float between [0, 1]"
-            ))
-        }
-    }
-}
-
-impl std::fmt::Display for MatchThreshold {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MatchThreshold::Absolute(n) => write!(f, "{n}"),
-            MatchThreshold::Relative(p) => write!(f, "{p}"),
         }
     }
 }

@@ -1,5 +1,4 @@
 use assert_cmd::Command;
-use deacon::MatchThreshold;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -893,67 +892,6 @@ fn test_shared_minimizer_counted_once() {
         "Expected 2 sequences in output (both reads of the pair should be kept) \
          but got {seqs_out}. This indicates shared minimizers were double-counted."
     );
-}
-
-#[test]
-fn test_match_threshold_parsing() {
-    // Test MatchThreshold parsing functionality
-    assert_eq!(
-        "2".parse::<MatchThreshold>().unwrap(),
-        MatchThreshold::Absolute(2)
-    );
-    assert_eq!(
-        "0.5".parse::<MatchThreshold>().unwrap(),
-        MatchThreshold::Relative(0.5)
-    );
-    assert_eq!(
-        "0.0".parse::<MatchThreshold>().unwrap(),
-        MatchThreshold::Relative(0.0)
-    );
-    assert_eq!(
-        "1.0".parse::<MatchThreshold>().unwrap(),
-        MatchThreshold::Relative(1.0)
-    );
-
-    // Test invalid inputs
-    assert!("1.5".parse::<MatchThreshold>().is_err()); // > 1.0
-    assert!("-0.1".parse::<MatchThreshold>().is_err()); // < 0.0
-    assert!("abc".parse::<MatchThreshold>().is_err()); // not a number
-}
-
-#[test]
-fn test_match_threshold_logic() {
-    let abs_threshold = MatchThreshold::Absolute(3);
-    let prop_threshold = MatchThreshold::Relative(0.5);
-
-    // Test absolute threshold
-    let required_abs = match abs_threshold {
-        MatchThreshold::Absolute(n) => n,
-        _ => panic!(),
-    };
-    assert!(3 >= required_abs);
-    assert!(5 >= required_abs);
-    assert!(2 < required_abs);
-
-    // Test relative threshold (50% of 10 minimizers = 5 hits required)
-    let required_rel = match prop_threshold {
-        MatchThreshold::Relative(f) => ((f * 10.0).ceil() as usize).max(1),
-        _ => panic!(),
-    };
-    assert!(5 >= required_rel);
-    assert!(6 >= required_rel);
-    assert!(4 < required_rel);
-
-    // Test edge case: minimum 1 hit required even for small proportions
-    let small_prop = MatchThreshold::Relative(0.1);
-    let required_small = match small_prop {
-        MatchThreshold::Relative(f) => ((f * 5.0).ceil() as usize).max(1),
-        _ => panic!(),
-    };
-    assert!(1 >= required_small); // 0.1 * 5 = 0.5, ceil to 1
-    assert!(0 < required_small);
-
-    // Test edge case: zero minimizers case would be handled at runtime
 }
 
 #[test]

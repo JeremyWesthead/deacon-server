@@ -5,3 +5,5 @@
 
 *.idx
 *.fastq.gz
+*.json
+*.txt

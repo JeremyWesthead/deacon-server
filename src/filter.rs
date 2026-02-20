@@ -6,7 +6,10 @@ use crate::minimizers::decode_u128;
 // use crate::index::load_minimizer_hashes;
 // use crate::minimizers::fill_minimizer_hashes;
 #[cfg(feature = "server")]
-use crate::server_common::{FilterRequest, FilterResponse};
+use crate::server_common::{
+    FilterPairedSequencesRequest, FilterPairedSequencesResponse, FilterSequencesRequest,
+    FilterSequencesResponse,
+};
 use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -483,7 +486,7 @@ fn should_keep_pair(
     // Process both sequences and count distinct hits
     let (_, hit_count1, num_minimizers1, hit_kmers1) = should_keep_sequence(
         ref_minimizers,
-        seq1,
+        &seq1,
         kmer_length,
         window_size,
         prefix_length,
@@ -494,7 +497,7 @@ fn should_keep_pair(
     );
     let (_, hit_count2, num_minimizers2, hit_kmers2) = should_keep_sequence(
         ref_minimizers,
-        seq2,
+        &seq2,
         kmer_length,
         window_size,
         prefix_length,
@@ -526,7 +529,7 @@ fn should_keep_pair(
 /// return a vector of booleans indicating whether each input should be output
 pub fn inputs_should_be_output(
     index_minimizers: &MinimizerSet,
-    seqs: &Vec<&[u8]>,
+    seqs: &Vec<Vec<u8>>,
     kmer_length: u8,
     window_size: u8,
     prefix_length: usize,
@@ -558,7 +561,7 @@ pub fn inputs_should_be_output(
 /// return a vector of booleans indicating whether each input should be output
 pub fn paired_inputs_should_be_output(
     index_minimizers: &MinimizerSet,
-    seqs: &Vec<(&[u8], &[u8])>,
+    seqs: &Vec<(Vec<u8>, Vec<u8>)>,
     kmer_length: u8,
     window_size: u8,
     prefix_length: usize,
@@ -571,8 +574,8 @@ pub fn paired_inputs_should_be_output(
         .map(|seq| {
             let (keep, _, _, hit_kmers) = should_keep_pair(
                 index_minimizers,
-                seq.0,
-                seq.1,
+                &seq.0,
+                &seq.1,
                 kmer_length,
                 window_size,
                 prefix_length,
@@ -587,45 +590,12 @@ pub fn paired_inputs_should_be_output(
         .collect()
 }
 
-// /// Send minimizers to server for checking against index.
-// /// Equivalent functionality to `inputs_should_be_output`, but remote
-// #[cfg(feature = "server")]
-// fn send_all_minimizers_to_server(
-//     input_minimizers: Vec<Vec<u64>>,
-//     server_address: &str,
-//     matches_threshold: &MatchThreshold,
-//     deplete: bool,
-// ) -> Result<Vec<bool>> {
-//     // Create a client to send the minimizers to the server
-//     let client = Client::new();
-
-//     // Send the minimizers as a POST request
-//     let response = client
-//         .post(server_address.to_owned() + "/should_output")
-//         .json(&FilterRequest {
-//             input: input_minimizers,
-//             match_threshold: *matches_threshold,
-//             deplete,
-//         })
-//         .send()?;
-
-//     // Check if the response indicates a match
-//     if response.status().is_success() {
-//         Ok(response.json::<FilterResponse>()?.should_output)
-//     } else {
-//         Err(anyhow::anyhow!(
-//             "Server returned an error: {}",
-//             response.status()
-//         ))
-//     }
-// }
-
 /// Given a set of input minimizers, check if they should be output
 /// If index minimizers are provided, check locally.
 /// If not, send to server for checking. Requires the `server` feature to be enabled.
 pub fn check_inputs_should_be_output(
     index_minimizers: &Option<MinimizerSet>,
-    seqs: &Vec<&[u8]>,
+    seqs: &Vec<Vec<u8>>,
     kmer_length: u8,
     window_size: u8,
     prefix_length: usize,
@@ -649,28 +619,50 @@ pub fn check_inputs_should_be_output(
             debug,
         )
     } else {
-        // Else, send the input minimizers to the server for checking
-        // #[cfg(feature = "server")]
-        // {
-        //     if _server_address.is_none() {
-        //         panic!("Server address is required when using the server feature.");
-        //     }
-        //     let server_address = _server_address.as_ref().map(String::as_str).unwrap();
-        //     send_all_minimizers_to_server(
-        //         input_minimizers.to_vec(),
-        //         server_address,
-        //         match_threshold,
-        //         deplete,
-        //     )
-        //     .unwrap_or_else(|e| {
-        //         panic!("Error checking input against index: {e}");
-        //     })
-        // }
-        // #[cfg(not(feature = "server"))]
-        // {
-        //     panic!("Server feature is not enabled. Cannot check input against index.");
-        // }
-        Vec::new()
+        // Else, send the input sequences to the server for checking
+        #[cfg(feature = "server")]
+        {
+            if _server_address.is_none() {
+                panic!("Server address is required when using the server feature.");
+            }
+            let server_address = _server_address.as_ref().map(String::as_str).unwrap();
+            // Create a client to send the minimizers to the server
+            let client = Client::new();
+
+            // Send the minimizers as a POST request
+            let response = client
+                .post(server_address.to_owned() + "/filter_sequences")
+                .json(&FilterSequencesRequest {
+                    sequences: seqs.clone(),
+                    abs_threshold,
+                    rel_threshold,
+                    prefix_length,
+                    deplete,
+                    debug,
+                })
+                .send();
+            match response {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        match resp.json::<FilterSequencesResponse>() {
+                            Ok(filter_response) => filter_response.results,
+                            Err(e) => {
+                                panic!("Error parsing response from server: {e}");
+                            }
+                        }
+                    } else {
+                        panic!("Server returned an error: {}", resp.status());
+                    }
+                }
+                Err(e) => {
+                    panic!("Error sending request to server: {e}");
+                }
+            }
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            panic!("Server feature is not enabled. Cannot check input against index.");
+        }
     }
 }
 
@@ -679,7 +671,7 @@ pub fn check_inputs_should_be_output(
 /// If not, send to server for checking. Requires the `server` feature to be enabled.
 pub fn check_paired_inputs_should_be_output(
     index_minimizers: &Option<MinimizerSet>,
-    seqs: &Vec<(&[u8], &[u8])>,
+    seqs: &Vec<(Vec<u8>, Vec<u8>)>,
     kmer_length: u8,
     window_size: u8,
     prefix_length: usize,
@@ -703,28 +695,50 @@ pub fn check_paired_inputs_should_be_output(
             debug,
         )
     } else {
-        // Else, send the input minimizers to the server for checking
-        // #[cfg(feature = "server")]
-        // {
-        //     if _server_address.is_none() {
-        //         panic!("Server address is required when using the server feature.");
-        //     }
-        //     let server_address = _server_address.as_ref().map(String::as_str).unwrap();
-        //     send_all_minimizers_to_server(
-        //         input_minimizers.to_vec(),
-        //         server_address,
-        //         match_threshold,
-        //         deplete,
-        //     )
-        //     .unwrap_or_else(|e| {
-        //         panic!("Error checking input against index: {e}");
-        //     })
-        // }
-        // #[cfg(not(feature = "server"))]
-        // {
-        //     panic!("Server feature is not enabled. Cannot check input against index.");
-        // }
-        Vec::new()
+        // Else, send the input sequences to the server for checking
+        #[cfg(feature = "server")]
+        {
+            if _server_address.is_none() {
+                panic!("Server address is required when using the server feature.");
+            }
+            let server_address = _server_address.as_ref().map(String::as_str).unwrap();
+            // Create a client to send the minimizers to the server
+            let client = Client::new();
+
+            // Send the minimizers as a POST request
+            let response = client
+                .post(server_address.to_owned() + "/filter_sequences")
+                .json(&FilterPairedSequencesRequest {
+                    sequences: seqs.clone(),
+                    abs_threshold,
+                    rel_threshold,
+                    prefix_length,
+                    deplete,
+                    debug,
+                })
+                .send();
+            match response {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        match resp.json::<FilterPairedSequencesResponse>() {
+                            Ok(filter_response) => filter_response.results,
+                            Err(e) => {
+                                panic!("Error parsing response from server: {e}");
+                            }
+                        }
+                    } else {
+                        panic!("Server returned an error: {}", resp.status());
+                    }
+                }
+                Err(e) => {
+                    panic!("Error sending request to server: {e}");
+                }
+            }
+        }
+        #[cfg(not(feature = "server"))]
+        {
+            panic!("Server feature is not enabled. Cannot check input against index.");
+        }
     }
 }
 
@@ -1112,7 +1126,7 @@ fn process_single_seqs(
             minimizer_hashes,
             &batch
                 .iter()
-                .map(|record_data| record_data.seq.as_slice())
+                .map(|record_data| record_data.seq.to_vec())
                 .collect(),
             kmer_length,
             window_size,
@@ -1296,7 +1310,7 @@ fn process_paired_seqs(
                 .iter()
                 .zip(batch2.iter())
                 .map(|(record_data1, record_data2)| {
-                    (record_data1.seq.as_slice(), record_data2.seq.as_slice())
+                    (record_data1.seq.to_vec(), record_data2.seq.to_vec())
                 })
                 .collect(),
             kmer_length,
@@ -1541,7 +1555,7 @@ fn process_interleaved_paired_seqs(
             &batch_pairs
                 .iter()
                 .map(|(record_data1, record_data2)| {
-                    (record_data1.seq.as_slice(), record_data2.seq.as_slice())
+                    (record_data1.seq.to_vec(), record_data2.seq.to_vec())
                 })
                 .collect(),
             kmer_length,

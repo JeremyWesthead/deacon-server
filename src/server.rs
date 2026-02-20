@@ -3,9 +3,12 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::MinimizerSet;
-use crate::filter::inputs_should_be_output;
+use crate::filter::{inputs_should_be_output, paired_inputs_should_be_output};
 use crate::index::{IndexHeader, load_minimizers_cached};
-use crate::server_common::{FilterRequest, FilterResponse};
+use crate::server_common::{
+    FilterPairedSequencesRequest, FilterPairedSequencesResponse, FilterSequencesRequest,
+    FilterSequencesResponse,
+};
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
@@ -42,6 +45,7 @@ pub async fn run_server(index_path: PathBuf, port: u16) {
     eprintln!("Loading index from: {}", index_path.display());
     // Load the index before starting the server to ensure it's available for requests
     load_index(index_path);
+    eprintln!("Index loaded, starting server on port {port}...");
 
     // build our application with a route
     let app = Router::new()
@@ -51,8 +55,10 @@ pub async fn run_server(index_path: PathBuf, port: u16) {
         .route("/index_header", get(index_header))
         // `GET /index_version` returns the index version (hash)
         .route("/index_version", get(index_version))
-        // `POST /filter` goes to `filter`
-        .route("/should_output", post(should_output))
+        // `POST /filter_sequences` filters sequences based on the loaded index
+        .route("/filter_sequences", post(filter_sequences))
+        // `POST /filter_paired_sequences` filters paired sequences based on the loaded index
+        .route("/filter_paired_sequences", post(filter_paired_sequences))
         // Increase the body limit to 2GB to ensure we don't error on large payloads
         .layer(DefaultBodyLimit::max(2147483648));
 
@@ -116,19 +122,51 @@ pub async fn index_version() -> String {
     hash.clone().unwrap()
 }
 
-/// Endpoint which takes a set of hashes, returning whether they match the index
-/// Endpoint is `/should_output`
-pub async fn should_output(Json(request): Json<FilterRequest>) -> Json<FilterResponse> {
+pub async fn filter_sequences(
+    Json(request): Json<FilterSequencesRequest>,
+) -> Json<FilterSequencesResponse> {
     let index = INDEX.lock();
     match index {
         Ok(index) => {
             let index = index.as_ref().expect("Index not loaded");
-            Json(FilterResponse {
-                should_output: inputs_should_be_output(
+            let header = INDEX_HEADER.lock().unwrap();
+            Json(FilterSequencesResponse {
+                results: inputs_should_be_output(
                     index,
-                    &request.input,
-                    &request.match_threshold,
+                    &request.sequences,
+                    header.kmer_length,
+                    header.window_size,
+                    request.prefix_length,
+                    request.abs_threshold,
+                    request.rel_threshold,
                     request.deplete,
+                    request.debug,
+                ),
+            })
+        }
+        Err(e) => panic!("Error accessing index: {e}"),
+    }
+}
+
+pub async fn filter_paired_sequences(
+    Json(request): Json<FilterPairedSequencesRequest>,
+) -> Json<FilterPairedSequencesResponse> {
+    let index = INDEX.lock();
+    match index {
+        Ok(index) => {
+            let index = index.as_ref().expect("Index not loaded");
+            let header = INDEX_HEADER.lock().unwrap();
+            Json(FilterPairedSequencesResponse {
+                results: paired_inputs_should_be_output(
+                    index,
+                    &request.sequences,
+                    header.kmer_length,
+                    header.window_size,
+                    request.prefix_length,
+                    request.abs_threshold,
+                    request.rel_threshold,
+                    request.deplete,
+                    request.debug,
                 ),
             })
         }
