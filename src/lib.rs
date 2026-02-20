@@ -25,18 +25,14 @@ pub use index::{
     dump as index_dump, dump_minimizers, info as index_info, intersect as index_intersect,
     load_minimizers, union as index_union,
 };
-pub use minimizers::{
-    DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE};//, compute_minimizer_hashes, fill_minimizer_hashes,
+pub use minimizers::{DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE}; //, compute_minimizer_hashes, fill_minimizer_hashes,
 // };
 
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::hash::BuildHasher;
 use std::collections::HashSet;
-
-
-
+use std::hash::BuildHasher;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 /// BuildHasher using rapidhash with fixed seed for fast init
 #[derive(Clone, Default)]

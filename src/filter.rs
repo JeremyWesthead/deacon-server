@@ -9,17 +9,15 @@ use anyhow::{Context, Result};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use needletail::kmer;
-use packed_seq::{PackedNSeqVec, SeqVec, u32x8};
 use itertools::Itertools;
 use liblzma::write::XzEncoder;
 use needletail::parse_fastx_file;
 use needletail::parse_fastx_stdin;
 use needletail::parser::Format;
+use packed_seq::{PackedNSeqVec, u32x8};
 use rayon::prelude::*;
 #[cfg(feature = "server")]
 use reqwest::blocking::Client;
-use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -747,35 +745,34 @@ pub fn run(
     Ok(())
 }
 
-
 fn get_summary_index(minimizers_path: &Option<&Path>, server_address: &Option<String>) -> String {
     let index = match minimizers_path {
         Some(path) => path.to_string_lossy().to_string(),
-        None => {
-            match &server_address {
-                None => "No index or server specified".to_string(),
-                Some(_addr) => {
-                    #[cfg(feature = "server")]
-                    {
-                        let client = Client::new();
-                        let response = client
-                            .get(_addr.to_owned() + "/index_version")
-                            .send().unwrap_or_else(|e| {
-                                panic!("Failed to contact server at {}: {e}", _addr);
-                            });
-                        if response.status().is_success() {
-                            _addr.to_owned() + ":" + &response
-                                .text().unwrap_or_else(|e| {
-                                    panic!("Failed to parse server response: {e}");
-                                })
-                        } else {
-                            panic!("Server returned error: {}", response.status())
-                        }
+        None => match &server_address {
+            None => "No index or server specified".to_string(),
+            Some(_addr) => {
+                #[cfg(feature = "server")]
+                {
+                    let client = Client::new();
+                    let response = client
+                        .get(_addr.to_owned() + "/index_version")
+                        .send()
+                        .unwrap_or_else(|e| {
+                            panic!("Failed to contact server at {}: {e}", _addr);
+                        });
+                    if response.status().is_success() {
+                        _addr.to_owned()
+                            + ":"
+                            + &response.text().unwrap_or_else(|e| {
+                                panic!("Failed to parse server response: {e}");
+                            })
+                    } else {
+                        panic!("Server returned error: {}", response.status())
                     }
-                    #[cfg(not(feature = "server"))]
-                    {
-                        panic!("Server feature not enabled, cannot use server address");
-                    }
+                }
+                #[cfg(not(feature = "server"))]
+                {
+                    panic!("Server feature not enabled, cannot use server address");
                 }
             }
         },

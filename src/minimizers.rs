@@ -1,5 +1,5 @@
-use packed_seq::{SeqVec, unpack_base};
 use crate::filter::Buffers;
+use packed_seq::{SeqVec, unpack_base};
 
 pub const DEFAULT_KMER_LENGTH: u8 = 31;
 pub const DEFAULT_WINDOW_SIZE: u8 = 15;

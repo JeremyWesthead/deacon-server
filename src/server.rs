@@ -68,7 +68,8 @@ fn load_index(index_path: PathBuf) {
     // Load the hash as well as the file contents for returning as an ugly (but reliable) version
     let bytes = std::fs::read(index_path.clone()).unwrap();
     let hash = sha256::digest(&bytes);
-    *INDEX_HASH.lock().unwrap() = Some(index_path.clone().into_os_string().into_string().unwrap() + "@" + &hash);
+    *INDEX_HASH.lock().unwrap() =
+        Some(index_path.clone().into_os_string().into_string().unwrap() + "@" + &hash);
 
     let result = load_minimizers_cached(Some(&index_path), &None);
     match result {

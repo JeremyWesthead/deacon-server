@@ -18,7 +18,6 @@ use indicatif::ProgressBar;
 /// Index format version
 pub const INDEX_FORMAT_VERSION: u8 = 3;
 
-
 /// Serialisable header for the index file
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexHeader {
@@ -113,9 +112,9 @@ pub fn load_minimizers_cached(
         // If no path is provided, check if a server adress was given to populate the header
         #[cfg(feature = "server")]
         {
-                use crate::server_common::get_server_index_header;
+            use crate::server_common::get_server_index_header;
 
-                Ok((None, get_server_index_header(server_address)?))
+            Ok((None, get_server_index_header(server_address)?))
         }
         #[cfg(not(feature = "server"))]
         {
@@ -127,7 +126,6 @@ pub fn load_minimizers_cached(
         Err(anyhow::anyhow!(
             "No index path provided and server mode not enabled. Cannot run without an index."
         ))
-    
     }
 }
 
