@@ -336,8 +336,8 @@ fn meets_filtering_criteria(
     }
 }
 
-fn get_minimizer_positions_and_values<'s>(
-    seq: &'s [u8],
+fn get_minimizer_positions_and_values(
+    seq: &[u8],
     mut buffers: Buffers,
     prefix_length: usize,
     kmer_length: u8,
@@ -389,6 +389,7 @@ fn get_minimizer_positions_and_values<'s>(
     buffers
 }
 
+#[allow(clippy::too_many_arguments)]
 fn should_keep_sequence(
     ref_minimizers: &MinimizerSet,
     seq: &[u8],
@@ -428,11 +429,9 @@ fn should_keep_sequence(
             let mut seen_hits = crate::RapidHashSet::default();
             let mut hit_kmers = Vec::new();
             for &minimizer in vec {
-                if set.contains(&minimizer) && seen_hits.insert(minimizer) {
-                    if debug {
-                        let kmer = decode_u64(minimizer, kmer_length);
-                        hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
-                    }
+                if set.contains(&minimizer) && seen_hits.insert(minimizer) && debug {
+                    let kmer = decode_u64(minimizer, kmer_length);
+                    hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
                 }
             }
             (seen_hits.len(), hit_kmers)
@@ -441,11 +440,9 @@ fn should_keep_sequence(
             let mut seen_hits = crate::RapidHashSet::default();
             let mut hit_kmers = Vec::new();
             for &minimizer in vec {
-                if set.contains(&minimizer) && seen_hits.insert(minimizer) {
-                    if debug {
-                        let kmer = decode_u128(minimizer, kmer_length);
-                        hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
-                    }
+                if set.contains(&minimizer) && seen_hits.insert(minimizer) && debug {
+                    let kmer = decode_u128(minimizer, kmer_length);
+                    hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
                 }
             }
             (seen_hits.len(), hit_kmers)
@@ -467,6 +464,7 @@ fn should_keep_sequence(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn should_keep_pair(
     ref_minimizers: &MinimizerSet,
     seq1: &[u8],
@@ -482,7 +480,7 @@ fn should_keep_pair(
     // Process both sequences and count distinct hits
     let (_, hit_count1, num_minimizers1, hit_kmers1) = should_keep_sequence(
         ref_minimizers,
-        &seq1,
+        seq1,
         kmer_length,
         window_size,
         prefix_length,
@@ -493,7 +491,7 @@ fn should_keep_pair(
     );
     let (_, hit_count2, num_minimizers2, hit_kmers2) = should_keep_sequence(
         ref_minimizers,
-        &seq2,
+        seq2,
         kmer_length,
         window_size,
         prefix_length,
@@ -523,6 +521,7 @@ fn should_keep_pair(
 
 /// Given a set of index minimizers and a vector of input minimizers,
 /// return a vector of booleans indicating whether each input should be output
+#[allow(clippy::too_many_arguments)]
 pub fn inputs_should_be_output(
     index_minimizers: &MinimizerSet,
     seqs: &Vec<Vec<u8>>,
@@ -555,6 +554,7 @@ pub fn inputs_should_be_output(
 
 /// Given a set of index minimizers and a vector of input minimizers,
 /// return a vector of booleans indicating whether each input should be output
+#[allow(clippy::too_many_arguments)]
 pub fn paired_inputs_should_be_output(
     index_minimizers: &MinimizerSet,
     seqs: &Vec<(Vec<u8>, Vec<u8>)>,
@@ -589,6 +589,7 @@ pub fn paired_inputs_should_be_output(
 /// Given a set of input minimizers, check if they should be output
 /// If index minimizers are provided, check locally.
 /// If not, send to server for checking. Requires the `server` feature to be enabled.
+#[allow(clippy::too_many_arguments)]
 pub fn check_inputs_should_be_output(
     index_minimizers: &Option<MinimizerSet>,
     seqs: &Vec<Vec<u8>>,
@@ -665,6 +666,7 @@ pub fn check_inputs_should_be_output(
 /// Given a set of input minimizers, check if they should be output
 /// If index minimizers are provided, check locally.
 /// If not, send to server for checking. Requires the `server` feature to be enabled.
+#[allow(clippy::too_many_arguments)]
 pub fn check_paired_inputs_should_be_output(
     index_minimizers: &Option<MinimizerSet>,
     seqs: &Vec<(Vec<u8>, Vec<u8>)>,
@@ -1016,7 +1018,7 @@ pub fn run(
 }
 
 fn get_summary_index(minimizers_path: &Option<&Path>, server_address: &Option<String>) -> String {
-    let index = match minimizers_path {
+    match minimizers_path {
         Some(path) => path.to_string_lossy().to_string(),
         None => match &server_address {
             None => "No index or server specified".to_string(),
@@ -1046,8 +1048,7 @@ fn get_summary_index(minimizers_path: &Option<&Path>, server_address: &Option<St
                 }
             }
         },
-    };
-    index
+    }
 }
 
 /// Filter a single (unpaired) sequence.
@@ -1140,7 +1141,7 @@ fn process_single_seqs(
             *total_seqs += 1;
             *total_bp += *seq_len as u64;
 
-            if debug && kmer_hits.len() > 0 {
+            if debug && !kmer_hits.is_empty() {
                 eprintln!(
                     "DEBUG: {} keep={} kmers=[{}]",
                     String::from_utf8_lossy(&record_data.id),
@@ -1329,7 +1330,7 @@ fn process_paired_seqs(
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
 
-            if debug && kmer_hits.len() > 0 {
+            if debug && !kmer_hits.is_empty() {
                 eprintln!(
                     "DEBUG: {} {} keep={} kmers=[{}]",
                     String::from_utf8_lossy(&record_data1.id),
@@ -1574,7 +1575,7 @@ fn process_interleaved_paired_seqs(
             *total_seqs += 2;
             *total_bp += (seq1_len + seq2_len) as u64;
 
-            if debug && kmer_hits.len() > 0 {
+            if debug && !kmer_hits.is_empty() {
                 eprintln!(
                     "DEBUG: {} {} keep={} kmers=[{}]",
                     String::from_utf8_lossy(&record1.id),

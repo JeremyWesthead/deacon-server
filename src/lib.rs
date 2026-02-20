@@ -62,6 +62,10 @@ impl MinimizerSet {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn is_u64(&self) -> bool {
         matches!(self, MinimizerSet::U64(_))
     }
@@ -318,7 +322,7 @@ impl IndexConfig {
     /// Create a new index configuration with the specified input path
     pub fn new(input_path: PathBuf) -> Self {
         Self {
-            input_path: input_path,
+            input_path,
             kmer_length: DEFAULT_KMER_LENGTH,
             window_size: DEFAULT_WINDOW_SIZE,
             output_path: None,
@@ -334,7 +338,7 @@ impl IndexConfig {
         let w = self.window_size as usize;
 
         // Check constraints: k <= 61, k+w <= 96, k+w even (ensures k odd and k+w-1 odd)
-        if k > 61 || k + w > 96 || (k + w) % 2 != 0 {
+        if k > 61 || k + w > 96 || !(k + w).is_multiple_of(2) {
             return Err(anyhow::anyhow!(
                 "Invalid k-w combination: k={}, w={}, k+w={} (constraints: k<=61, k+w<=96, k+w even)",
                 k,
