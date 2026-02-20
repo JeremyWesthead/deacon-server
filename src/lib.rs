@@ -387,11 +387,3 @@ impl IndexConfig {
         index::build(self)
     }
 }
-
-// pub fn write_minimizers(
-//     minimizers: &FxHashSet<u64>,
-//     header: &index::IndexHeader,
-//     output_path: Option<&PathBuf>,
-// ) -> Result<()> {
-//     index::write_minimizers(minimizers, header, output_path)
-// }

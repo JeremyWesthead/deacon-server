@@ -122,6 +122,8 @@ pub async fn index_version() -> String {
     hash.clone().unwrap()
 }
 
+/// Endpoint to filter a set of sequences based on the loaded index and the provided parameters
+/// Endpoint is `/filter_sequences`
 pub async fn filter_sequences(
     Json(request): Json<FilterSequencesRequest>,
 ) -> Json<FilterSequencesResponse> {
@@ -148,6 +150,8 @@ pub async fn filter_sequences(
     }
 }
 
+/// Endpoint to filter a set of paired sequences based on the loaded index and the provided parameters
+/// Endpoint is `/filter_paired_sequences`
 pub async fn filter_paired_sequences(
     Json(request): Json<FilterPairedSequencesRequest>,
 ) -> Json<FilterPairedSequencesResponse> {

@@ -36,11 +36,7 @@ const OUTPUT_BUFFER_SIZE: usize = 8 * 1024 * 1024; // Opt: 8MB output buffer
 #[derive(Clone, Default, Debug)]
 pub(crate) struct ProcessingStats {
     pub total_seqs: u64,
-    filtered_seqs: u64,
     pub total_bp: u64,
-    output_bp: u64,
-    filtered_bp: u64,
-    output_seq_counter: u64,
     pub last_reported: u64,
 }
 
