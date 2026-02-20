@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use deacon::{
-    DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE, MatchThreshold, build_index, diff_index, index_info,
-    run_filter, union_index,
+    DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE, IndexConfig, MatchThreshold, index_diff, index_info, run_filter, index_union, index_fetch, index_intersect, index_dump,
 };
 use std::path::PathBuf;
 
@@ -134,33 +133,32 @@ enum Commands {
 enum IndexCommands {
     /// Index minimizers contained within a fastx file
     Build {
-        /// Path to input fastx file (supports gz, zst and xz compression)
+        /// Path to input fastx file (or - for stdin; supports gz, zst and xz compression)
         input: PathBuf,
 
-        /// K-mer length used for indexing
+        /// K-mer length used for indexing (k+w-1 must be <= 96 and odd)
         #[arg(short = 'k', default_value_t = DEFAULT_KMER_LENGTH)]
-        kmer_length: usize,
+        kmer_length: u8,
 
         /// Minimizer window size used for indexing
         #[arg(short = 'w', default_value_t = DEFAULT_WINDOW_SIZE)]
-        window_size: usize,
+        window_size: u8,
 
-        /// Path to output file (- for stdout)
-        #[arg(short = 'o', long = "output", default_value = "-")]
-        output: String,
-
-        /// Preallocated index capacity in millions of minimizers
-        #[arg(short = 'c', long = "capacity", default_value_t = 400)]
-        capacity_millions: usize,
+        /// Path to output file (stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
 
         /// Number of execution threads (0 = auto)
         #[arg(short = 't', long = "threads", default_value_t = 8)]
-        threads: usize,
-    },
-    /// Show index information
-    Info {
-        /// Path to index file
-        index: PathBuf,
+        threads: u16,
+
+        /// Suppress sequence header output
+        #[arg(short = 'q', long = "quiet")]
+        quiet: bool,
+
+        /// Minimum scaled entropy threshold for k-mer filtering (0.0-1.0)
+        #[arg(short = 'e', long = "entropy-threshold", default_value = "0.0")]
+        entropy_threshold: f32,
     },
     /// Combine multiple minimizer indexes (A ∪ B…)
     Union {
@@ -168,8 +166,18 @@ enum IndexCommands {
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
 
-        /// Path to output file (- for stdout)
-        #[arg(short = 'o', long = "output", default_value = "-")]
+        /// Path to output file (stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
+    /// Intersect multiple minimizer indexes (A ∩ B…)
+    Intersect {
+        /// Path(s) to two or more index file(s)
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+
+        /// Path to output file (stdout if not specified)
+        #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
     },
     /// Subtract minimizers in one index from another (A - B)
@@ -182,16 +190,52 @@ enum IndexCommands {
         #[arg(required = true)]
         second: PathBuf,
 
-        /// K-mer length (required if second argument is FASTX file)
-        #[arg(short = 'k', long = "kmer-length")]
-        kmer_length: Option<usize>,
+        /// K-mer length (required if second argument is FASTX file, 1-32)
+        #[arg(short = 'k', long = "kmer-length", value_parser = clap::value_parser!(u8).range(1..=32))]
+        kmer_length: Option<u8>,
 
         /// Window size (required if second argument is FASTX file)
         #[arg(short = 'w', long = "window-size")]
-        window_size: Option<usize>,
+        window_size: Option<u8>,
 
-        /// Path to output file (- for stdout)
-        #[arg(short = 'o', long = "output", default_value = "-")]
+        /// Number of execution threads (0 = auto)
+        #[arg(short = 't', long = "threads", default_value_t = 8)]
+        threads: u16,
+
+        /// Path to output file (stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
+    /// Dump minimizer index to fasta
+    Dump {
+        /// Path to index file
+        index: PathBuf,
+
+        /// Path to output file (stdout if not specified)
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
+    /// Show index information
+    Info {
+        /// Path to index file
+        index: PathBuf,
+    },
+    /// Fetch a pre-built index from remote storage
+    Fetch {
+        /// Index name (e.g., panhuman-1)
+        #[arg(default_value = "panhuman-1")]
+        index_name: String,
+
+        /// K-mer length
+        #[arg(short = 'k', default_value_t = DEFAULT_KMER_LENGTH)]
+        kmer_length: u8,
+
+        /// Minimizer window size
+        #[arg(short = 'w', default_value_t = DEFAULT_WINDOW_SIZE)]
+        window_size: u8,
+
+        /// Path to output file (default: ./)
+        #[arg(short = 'o', long = "output")]
         output: Option<PathBuf>,
     },
 }
@@ -213,32 +257,42 @@ fn main() -> Result<()> {
                 kmer_length,
                 window_size,
                 output,
-                capacity_millions,
                 threads,
+                quiet,
+                entropy_threshold,
             } => {
-                // Convert output string to Option<PathBuf>
-                let output_path = if output == "-" {
-                    None
-                } else {
-                    Some(PathBuf::from(output))
+                let config = IndexConfig {
+                    input_path: input.clone(),
+                    kmer_length: *kmer_length,
+                    window_size: *window_size,
+                    output_path: output.clone(),
+                    threads: *threads,
+                    quiet: *quiet,
+                    entropy_threshold: *entropy_threshold,
                 };
-
-                build_index(
-                    input,
-                    *kmer_length,
-                    *window_size,
-                    output_path,
-                    *capacity_millions,
-                    *threads,
-                )
-                .context("Failed to run index build command")?;
+                config
+                    .execute()
+                    .context("Failed to run index build command")?;
             }
             IndexCommands::Info { index } => {
                 index_info(index).context("Failed to run index info command")?;
             }
+            IndexCommands::Fetch {
+                index_name,
+                kmer_length,
+                window_size,
+                output,
+            } => {
+                index_fetch(index_name, *kmer_length, *window_size, output.as_deref())
+                    .context("Failed to run index fetch command")?;
+            }
             IndexCommands::Union { inputs, output } => {
-                union_index(inputs, output.as_ref())
+                index_union(inputs, output.as_deref())
                     .context("Failed to run index union command")?;
+            }
+            IndexCommands::Intersect { inputs, output } => {
+                index_intersect(inputs, output.as_deref())
+                    .context("Failed to run index intersect command")?;
             }
             IndexCommands::Diff {
                 first,
@@ -246,9 +300,20 @@ fn main() -> Result<()> {
                 kmer_length,
                 window_size,
                 output,
+                threads,
             } => {
-                diff_index(first, second, *kmer_length, *window_size, output.as_ref())
-                    .context("Failed to run index diff command")?;
+                index_diff(
+                    first,
+                    second,
+                    *kmer_length,
+                    *window_size,
+                    *threads,
+                    output.as_deref(),
+                )
+                .context("Failed to run index diff command")?;
+            }
+            IndexCommands::Dump { index, output } => {
+                index_dump(index, output.as_deref()).context("Failed to run index dump command")?;
             }
         },
         Commands::Filter {
@@ -326,12 +391,14 @@ fn main() -> Result<()> {
             #[cfg(feature = "server")]
             {
                 // Validate output2 usage
+
+                use std::path::Path;
                 if output2.is_some() && input2.is_none() {
                     eprintln!(
                         "Warning: --output2 specified but no second input file provided. --output2 will be ignored."
                     );
                 }
-                let dummy_index: Option<&PathBuf> = None;
+                let dummy_index: Option<&Path> = None;
                 run_filter(
                     dummy_index,
                     input,

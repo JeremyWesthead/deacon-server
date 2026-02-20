@@ -3,6 +3,7 @@
 //! Basically a duplicate of the contents of `filter_tests.rs`,
 //! but swapping to use the server filtering instead of local.
 use assert_cmd::Command;
+use deacon::IndexConfig;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -84,14 +85,16 @@ fn create_test_paired_fastq(path1: &Path, path2: &Path) {
 
 fn build_index(fasta_path: &Path, bin_path: &Path) {
     // Build the index using the deacon command
-    let res = deacon::index::build(
-        &fasta_path.to_path_buf(),
-        deacon::DEFAULT_KMER_LENGTH,
-        deacon::DEFAULT_WINDOW_SIZE,
-        Some(bin_path.to_path_buf()),
-        400,
-        0,
-    );
+    let config = IndexConfig {
+        input_path: fasta_path.to_path_buf(),
+        kmer_length: deacon::DEFAULT_KMER_LENGTH,
+        window_size: deacon::DEFAULT_WINDOW_SIZE,
+        output_path: Some(bin_path.to_path_buf()),
+        threads: 1,
+        quiet: true,
+        entropy_threshold: 0.0,
+    };
+    let res = config.execute();
     assert!(res.is_ok(), "Failed to build index: {:?}", res.err());
 }
 

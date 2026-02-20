@@ -19,17 +19,132 @@ pub mod server_common;
 
 // Re-export the important structures and functions for library users
 pub use filter::{FilterSummary, run as run_filter};
+pub use index::fetch as index_fetch;
 pub use index::{
-    IndexHeader, build as build_index, diff as diff_index, info as index_info, union as union_index,
+    INDEX_FORMAT_VERSION, IndexHeader, build as index_build, diff as index_diff,
+    dump as index_dump, dump_minimizers, info as index_info, intersect as index_intersect,
+    load_minimizers, union as index_union,
 };
 pub use minimizers::{
-    DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE, compute_minimizer_hashes, fill_minimizer_hashes,
-};
+    DEFAULT_KMER_LENGTH, DEFAULT_WINDOW_SIZE};//, compute_minimizer_hashes, fill_minimizer_hashes,
+// };
 
 use anyhow::Result;
-use rustc_hash::FxHashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::hash::BuildHasher;
+use std::collections::HashSet;
+
+
+
+
+/// BuildHasher using rapidhash with fixed seed for fast init
+#[derive(Clone, Default)]
+pub struct FixedRapidHasher;
+
+impl BuildHasher for FixedRapidHasher {
+    type Hasher = rapidhash::fast::RapidHasher<'static>;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        rapidhash::fast::SeedableState::fixed().build_hasher()
+    }
+}
+
+/// RapidHashSet using rapidhash with fixed seed for fast init
+pub type RapidHashSet<T> = HashSet<T, FixedRapidHasher>;
+
+/// Zero-cost (hopefully?) abstraction over u64 and u128 minimizer sets
+#[derive(Clone)]
+pub enum MinimizerSet {
+    U64(RapidHashSet<u64>),
+    U128(RapidHashSet<u128>),
+}
+
+impl MinimizerSet {
+    pub fn len(&self) -> usize {
+        match self {
+            MinimizerSet::U64(set) => set.len(),
+            MinimizerSet::U128(set) => set.len(),
+        }
+    }
+
+    pub fn is_u64(&self) -> bool {
+        matches!(self, MinimizerSet::U64(_))
+    }
+
+    /// Extend with another MinimizerSet (union operation)
+    pub fn extend(&mut self, other: Self) {
+        match (self, other) {
+            (MinimizerSet::U64(self_set), MinimizerSet::U64(other_set)) => {
+                self_set.extend(other_set);
+            }
+            (MinimizerSet::U128(self_set), MinimizerSet::U128(other_set)) => {
+                self_set.extend(other_set);
+            }
+            _ => panic!("Cannot extend U64 set with U128 set or vice versa"),
+        }
+    }
+
+    /// Remove minimizers from another set (diff operation)
+    pub fn remove_all(&mut self, other: &Self) {
+        match (self, other) {
+            (MinimizerSet::U64(self_set), MinimizerSet::U64(other_set)) => {
+                for val in other_set {
+                    self_set.remove(val);
+                }
+            }
+            (MinimizerSet::U128(self_set), MinimizerSet::U128(other_set)) => {
+                for val in other_set {
+                    self_set.remove(val);
+                }
+            }
+            _ => panic!("Cannot remove U128 minimizers from U64 set or vice versa"),
+        }
+    }
+
+    /// Keep only minimizers present in another set (intersection operation)
+    pub fn intersect(&mut self, other: &Self) {
+        match (self, other) {
+            (MinimizerSet::U64(self_set), MinimizerSet::U64(other_set)) => {
+                self_set.retain(|val| other_set.contains(val));
+            }
+            (MinimizerSet::U128(self_set), MinimizerSet::U128(other_set)) => {
+                self_set.retain(|val| other_set.contains(val));
+            }
+            _ => panic!("Cannot intersect U64 set with U128 set or vice versa"),
+        }
+    }
+}
+
+/// Zero-cost (hopefully?) abstraction over u64 and u128 minimizer sets
+#[derive(Clone)]
+pub enum MinimizerVec {
+    U64(Vec<u64>),
+    U128(Vec<u128>),
+}
+
+impl MinimizerVec {
+    pub fn clear(&mut self) {
+        match self {
+            MinimizerVec::U64(v) => v.clear(),
+            MinimizerVec::U128(v) => v.clear(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            MinimizerVec::U64(v) => v.len(),
+            MinimizerVec::U128(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MinimizerVec::U64(v) => v.is_empty(),
+            MinimizerVec::U128(v) => v.is_empty(),
+        }
+    }
+}
 
 /// Match threshold for filtering sequences.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -203,42 +318,64 @@ pub struct IndexConfig {
     pub input_path: PathBuf,
 
     /// K-mer length used for indexing
-    pub kmer_length: usize,
+    pub kmer_length: u8,
 
     /// Minimizer window size used for indexing
-    pub window_size: usize,
+    pub window_size: u8,
 
     /// Path to output file (None for stdout)
     pub output_path: Option<PathBuf>,
 
-    /// Hash table pre-allocation capacity in millions
-    pub capacity_millions: usize,
-
     /// Number of execution threads (0 = auto)
-    pub threads: usize,
+    pub threads: u16,
+
+    /// Suppress per-sequence progress output
+    pub quiet: bool,
+
+    /// Minimum scaled entropy threshold for k-mer filtering (0.0-1.0)
+    pub entropy_threshold: f32,
 }
 
 impl IndexConfig {
     /// Create a new index configuration with the specified input path
     pub fn new(input_path: PathBuf) -> Self {
         Self {
-            input_path,
+            input_path: input_path,
             kmer_length: DEFAULT_KMER_LENGTH,
             window_size: DEFAULT_WINDOW_SIZE,
             output_path: None,
-            capacity_millions: 500, // Default 500M capacity
             threads: 8,
+            quiet: false,
+            entropy_threshold: 0.0,
         }
     }
 
+    /// Validate k-mer and window size constraints
+    pub fn validate(&self) -> Result<()> {
+        let k = self.kmer_length as usize;
+        let w = self.window_size as usize;
+
+        // Check constraints: k <= 61, k+w <= 96, k+w even (ensures k odd and k+w-1 odd)
+        if k > 61 || k + w > 96 || (k + w) % 2 != 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid k-w combination: k={}, w={}, k+w={} (constraints: k<=61, k+w<=96, k+w even)",
+                k,
+                w,
+                k + w
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Set k-mer length
-    pub fn with_kmer_length(mut self, kmer_length: usize) -> Self {
+    pub fn with_kmer_length(mut self, kmer_length: u8) -> Self {
         self.kmer_length = kmer_length;
         self
     }
 
     /// Set window size
-    pub fn with_window_size(mut self, window_size: usize) -> Self {
+    pub fn with_window_size(mut self, window_size: u8) -> Self {
         self.window_size = window_size;
         self
     }
@@ -249,39 +386,34 @@ impl IndexConfig {
         self
     }
 
-    /// Set hash table capacity in millions
-    pub fn with_capacity_millions(mut self, capacity_millions: usize) -> Self {
-        self.capacity_millions = capacity_millions;
+    /// Set threads
+    pub fn with_threads(mut self, threads: u16) -> Self {
+        self.threads = threads;
         self
     }
 
-    /// Set threads
-    pub fn with_threads(mut self, threads: usize) -> Self {
-        self.threads = threads;
+    /// Set quiet mode
+    pub fn with_quiet(mut self, quiet: bool) -> Self {
+        self.quiet = quiet;
+        self
+    }
+
+    /// Set threshold for scaled entropy filtering at indexing time
+    pub fn with_entropy_threshold(mut self, threshold: f32) -> Self {
+        self.entropy_threshold = threshold;
         self
     }
 
     /// Execute index build with this configuration
     pub fn execute(&self) -> Result<()> {
-        build_index(
-            &self.input_path,
-            self.kmer_length,
-            self.window_size,
-            self.output_path.clone(),
-            self.capacity_millions,
-            self.threads,
-        )
+        index::build(self)
     }
 }
 
-pub fn load_minimizers(path: &PathBuf) -> Result<(Option<FxHashSet<u64>>, index::IndexHeader)> {
-    index::load_minimizer_hashes(&Some(path), &None)
-}
-
-pub fn write_minimizers(
-    minimizers: &FxHashSet<u64>,
-    header: &index::IndexHeader,
-    output_path: Option<&PathBuf>,
-) -> Result<()> {
-    index::write_minimizers(minimizers, header, output_path)
-}
+// pub fn write_minimizers(
+//     minimizers: &FxHashSet<u64>,
+//     header: &index::IndexHeader,
+//     output_path: Option<&PathBuf>,
+// ) -> Result<()> {
+//     index::write_minimizers(minimizers, header, output_path)
+// }

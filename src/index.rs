@@ -1,17 +1,23 @@
+use crate::filter::{Buffers, ProcessingStats};
+use crate::minimizers::KmerHasher;
+use crate::{FixedRapidHasher, IndexConfig, RapidHashSet};
 use anyhow::{Context, Result};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
-use rayon::prelude::*;
-use rustc_hash::FxHashSet;
+use paraseq::Record;
+use paraseq::prelude::{ParallelProcessor, ParallelReader};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use needletail::{parse_fastx_file, parse_fastx_stdin};
+use indicatif::ProgressBar;
 
-#[cfg(feature = "server")]
-use crate::server_common::get_server_index_header;
+/// Index format version
+pub const INDEX_FORMAT_VERSION: u8 = 3;
+
 
 /// Serialisable header for the index file
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -22,20 +28,33 @@ pub struct IndexHeader {
 }
 
 impl IndexHeader {
-    pub fn new(kmer_length: usize, window_size: usize) -> Self {
+    pub fn new(kmer_length: u8, window_size: u8) -> Self {
         IndexHeader {
-            format_version: 2,
-            kmer_length: kmer_length as u8,
-            window_size: window_size as u8,
+            format_version: INDEX_FORMAT_VERSION,
+            kmer_length,
+            window_size,
         }
     }
 
     /// Validate header
-    pub fn validate(&self) -> Result<()> {
-        if self.format_version != 2 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.format_version != INDEX_FORMAT_VERSION {
             return Err(anyhow::anyhow!(
                 "Unsupported index format version: {}",
                 self.format_version
+            ));
+        }
+
+        let k = self.kmer_length as usize;
+        let w = self.window_size as usize;
+
+        // Check constraints: k <= 61, k+w <= 96, k+w even (ensures k odd and k+w-1 odd)
+        if k > 61 || k + w > 96 || (k + w) % 2 != 0 {
+            return Err(anyhow::anyhow!(
+                "Invalid k-w combination: k={}, w={}, k+w={} (constraints: k<=61, k+w<=96, k+w even)",
+                k,
+                w,
+                k + w
             ));
         }
 
@@ -43,78 +62,60 @@ impl IndexHeader {
     }
 
     /// Get k
-    pub fn kmer_length(&self) -> usize {
-        self.kmer_length as usize
+    pub fn kmer_length(&self) -> u8 {
+        self.kmer_length
     }
 
     /// Get w
-    pub fn window_size(&self) -> usize {
-        self.window_size as usize
+    pub fn window_size(&self) -> u8 {
+        self.window_size
     }
 }
 
 /// Load just the header and count from an index file
-pub fn load_header_and_count(path: &PathBuf) -> Result<(IndexHeader, usize)> {
-    let file = File::open(path).context(format!("Failed to open index file {path:?}"))?;
+pub fn load_header_and_count<P: AsRef<Path>>(path: &P) -> Result<(IndexHeader, usize)> {
+    let file =
+        File::open(path).context(format!("Failed to open index file {:?}", path.as_ref()))?;
     let mut reader = BufReader::new(file);
 
+    let config = bincode::config::standard().with_fixed_int_encoding();
+
     // Deserialise header
-    let header: IndexHeader = decode_from_std_read(&mut reader, bincode::config::standard())
-        .context("Failed to deserialise index header")?;
+    let header: IndexHeader =
+        decode_from_std_read(&mut reader, config).context("Failed to deserialise index header")?;
     header.validate()?;
 
     // Deserialise the count of minimizers
-    let count: usize = decode_from_std_read(&mut reader, bincode::config::standard())
+    let count: usize = decode_from_std_read(&mut reader, config)
         .context("Failed to deserialise minimizer count")?;
 
     Ok((header, count))
 }
 
-/// Load the hashes without spiking memory usage with an extra vec.
-/// If a path is provided, it will read the minimizers from the file and return them in a FxHashSet
-///
-/// If no path is provided, it will try to load the header from a server, returning the minimizers as None
-/// This is used for server mode, where the header is important, but local minimizers are not needed.
-/// If the server feature is not enabled, it will return an error.
-pub fn load_minimizer_hashes(
-    path_option: &Option<&PathBuf>,
-    _server_address_option: &Option<String>,
-) -> Result<(Option<FxHashSet<u64>>, IndexHeader)> {
-    if let Some(path) = path_option {
-        let file = File::open(path).context(format!("Failed to open index file {path:?}"))?;
-        let mut reader = BufReader::new(file);
+static INDEX: OnceLock<(PathBuf, crate::MinimizerSet, IndexHeader)> = OnceLock::new();
 
-        // Deserialise header
-        let header: IndexHeader = decode_from_std_read(&mut reader, bincode::config::standard())
-            .context("Failed to deserialise index header")?;
-        header.validate()?;
+pub fn load_minimizers_cached(
+    path: Option<&Path>,
+    server_address: &Option<String>,
+) -> Result<(Option<crate::MinimizerSet>, IndexHeader)> {
+    if let Some(path) = path {
+        let (p, minimizers, header) = INDEX.get_or_init(|| {
+            let (m, h) = load_minimizers(path).unwrap();
+            (path.to_owned(), m, h)
+        });
+        assert_eq!(
+            p, path,
+            "Currently, the server can only have one index loaded."
+        );
 
-        // Deserialise the count of minimizers so we can init a FxHashSet with the right capacity
-        let count: usize = decode_from_std_read(&mut reader, bincode::config::standard())
-            .context("Failed to deserialise minimizer count")?;
-
-        // Pre-allocate FxHashSet with correct capacity
-        let mut minimizers = FxHashSet::with_capacity_and_hasher(count, Default::default());
-
-        // Populate FxHashSet
-        for _ in 0..count {
-            let hash: u64 = decode_from_std_read(&mut reader, bincode::config::standard())
-                .context("Failed to deserialise minimizer hash")?;
-            minimizers.insert(hash);
-        }
-
-        Ok((Some(minimizers), header))
-    } else {
+        Ok((Some(minimizers.clone()), header.clone()))
+    } else if let Some(server_address) = server_address {
         // If no path is provided, check if a server adress was given to populate the header
         #[cfg(feature = "server")]
         {
-            if let Some(server) = _server_address_option {
-                Ok((None, get_server_index_header(&server.to_string())?))
-            } else {
-                Err(anyhow::anyhow!(
-                    "No server address provided for running in server mode"
-                ))
-            }
+                use crate::server_common::get_server_index_header;
+
+                Ok((None, get_server_index_header(server_address)?))
         }
         #[cfg(not(feature = "server"))]
         {
@@ -122,64 +123,297 @@ pub fn load_minimizer_hashes(
                 "Server feature is not enabled. Cannot run without an index."
             ));
         }
+    } else {
+        Err(anyhow::anyhow!(
+            "No index path provided and server mode not enabled. Cannot run without an index."
+        ))
+    
     }
 }
 
-/// Helper function to write minimizers to output file or stdout
-pub fn write_minimizers(
-    minimizers: &FxHashSet<u64>,
-    header: &IndexHeader,
-    output_path: Option<&PathBuf>,
-) -> Result<()> {
-    // Create writer based on output path
-    let writer: Box<dyn Write> = if let Some(path) = output_path {
-        if path.to_string_lossy() == "-" {
-            Box::new(BufWriter::new(io::stdout()))
-        } else {
-            Box::new(BufWriter::new(
-                File::create(path).context("Failed to create output file")?,
-            ))
+/// Load minimizers from an index file
+pub fn load_minimizers(path: &Path) -> Result<(crate::MinimizerSet, IndexHeader)> {
+    let file = File::open(path).context(format!("Failed to open index file {:?}", path))?;
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let config = bincode::config::standard().with_fixed_int_encoding();
+
+    // Deserialise header
+    let header: IndexHeader =
+        decode_from_std_read(&mut reader, config).context("Failed to deserialise index header")?;
+    header.validate()?;
+
+    // Deserialise the count of minimizers
+    let count: usize = decode_from_std_read(&mut reader, config)
+        .context("Failed to deserialise minimizer count")?;
+
+    let bytes_per_minimizer = (header.kmer_length as usize).div_ceil(4);
+
+    let minimizers = if header.kmer_length <= 32 {
+        // Read as u64 with packed byte-aligned format
+        let mut set = RapidHashSet::<u64>::with_capacity_and_hasher(count, FixedRapidHasher);
+        const B: usize = 16 * 1024;
+        let mut buffer = vec![0u8; bytes_per_minimizer * B];
+        for i in (0..count).step_by(B) {
+            let batch_count = B.min(count - i);
+            let batch_bytes = bytes_per_minimizer * batch_count;
+            let batch = &mut buffer[..batch_bytes];
+            reader.read_exact(batch).context(format!(
+                "Failed to load minimizer batch {}, index may be corrupt",
+                i / B
+            ))?;
+
+            // Extract minimizers from packed bytes
+            for j in 0..batch_count {
+                let start = j * bytes_per_minimizer;
+                let end = start + bytes_per_minimizer;
+                let mut minimizer_bytes = [0u8; 8];
+                minimizer_bytes[..bytes_per_minimizer].copy_from_slice(&batch[start..end]);
+                set.insert(u64::from_le_bytes(minimizer_bytes));
+            }
         }
+        crate::MinimizerSet::U64(set)
     } else {
-        Box::new(BufWriter::new(io::stdout()))
+        // Read as u128 with packed byte-aligned format
+        let mut set = RapidHashSet::<u128>::with_capacity_and_hasher(count, FixedRapidHasher);
+        const B: usize = 16 * 1024;
+        let mut buffer = vec![0u8; bytes_per_minimizer * B];
+        for i in (0..count).step_by(B) {
+            let batch_count = B.min(count - i);
+            let batch_bytes = bytes_per_minimizer * batch_count;
+            let batch = &mut buffer[..batch_bytes];
+            reader.read_exact(batch).context(format!(
+                "Failed to load minimizer batch {}, index may be corrupt",
+                i / B
+            ))?;
+
+            // Extract minimizers from packed bytes
+            for j in 0..batch_count {
+                let start = j * bytes_per_minimizer;
+                let end = start + bytes_per_minimizer;
+                let mut minimizer_bytes = [0u8; 16];
+                minimizer_bytes[..bytes_per_minimizer].copy_from_slice(&batch[start..end]);
+                set.insert(u128::from_le_bytes(minimizer_bytes));
+            }
+        }
+        crate::MinimizerSet::U128(set)
     };
 
-    // Serialise header and minimizers
-    let mut writer = BufWriter::new(writer);
-    encode_into_std_write(header, &mut writer, bincode::config::standard())
+    // Validate that we loaded the expected number of minimizers
+    let loaded_count = minimizers.len();
+    if loaded_count != count {
+        return Err(anyhow::anyhow!(
+            "Failed to load expected number of minimizers; expected {} and observed {}. Index may be corrupt",
+            count,
+            loaded_count
+        ));
+    }
+
+    Ok((minimizers, header))
+}
+
+/// Helper function to write minimizers to output file or stdout
+pub fn dump_minimizers(
+    minimizers: &crate::MinimizerSet,
+    header: &IndexHeader,
+    output_path: Option<&Path>,
+) -> Result<()> {
+    // Create writer based on output path
+    let mut writer: BufWriter<Box<dyn Write>> = match output_path {
+        Some(path) if path.as_os_str() != "-" => BufWriter::new(Box::new(
+            File::create(path).context("Failed to create output file")?,
+        )),
+        _ => BufWriter::new(Box::new(io::stdout())),
+    };
+
+    // Use fixed-width little-endian encoding for all values.
+    let config = bincode::config::standard().with_fixed_int_encoding();
+    encode_into_std_write(header, &mut writer, config)
         .context("Failed to serialise index header")?;
 
     // Serialise the count of minimizers first
     let count = minimizers.len();
-    encode_into_std_write(count, &mut writer, bincode::config::standard())
+    encode_into_std_write(count, &mut writer, config)
         .context("Failed to serialise minimizer count")?;
 
-    // Serialise each minimizer directly
-    for &hash in minimizers {
-        encode_into_std_write(hash, &mut writer, bincode::config::standard())
-            .context("Failed to serialise minimizer hash")?;
+    // Serialise minimizers in byte-aligned packed format
+    let bytes_per_minimizer = (header.kmer_length as usize).div_ceil(4);
+    match minimizers {
+        crate::MinimizerSet::U64(set) => {
+            for &val in set {
+                // Write only the required bytes (little-endian)
+                let bytes = val.to_le_bytes();
+                writer
+                    .write_all(&bytes[..bytes_per_minimizer])
+                    .context("Failed to write minimizer")?;
+            }
+        }
+        crate::MinimizerSet::U128(set) => {
+            for &val in set {
+                // Write only the required bytes (little-endian)
+                let bytes = val.to_le_bytes();
+                writer
+                    .write_all(&bytes[..bytes_per_minimizer])
+                    .context("Failed to write minimizer")?;
+            }
+        }
     }
     Ok(())
 }
 
+/// Dump indexed minimizers to FASTA
+pub fn dump(index_path: &Path, output_path: Option<&Path>) -> Result<()> {
+    // Load the index
+    let (minimizers, header) = load_minimizers(index_path).context("Failed to load index")?;
+
+    // Create writer based on output path
+    let mut writer: BufWriter<Box<dyn Write>> = match output_path {
+        Some(path) if path.as_os_str() != "-" => BufWriter::new(Box::new(
+            File::create(path).context("Failed to create output file")?,
+        )),
+        _ => BufWriter::new(Box::new(io::stdout())),
+    };
+
+    // Write FASTA
+    let mut counter = 0;
+    match minimizers {
+        crate::MinimizerSet::U64(set) => {
+            for &minimizer in &set {
+                counter += 1;
+                let sequence = crate::minimizers::decode_u64(minimizer, header.kmer_length);
+                writeln!(writer, ">{}", counter)?;
+                writeln!(writer, "{}", String::from_utf8_lossy(&sequence))?;
+            }
+        }
+        crate::MinimizerSet::U128(set) => {
+            for &minimizer in &set {
+                counter += 1;
+                let sequence = crate::minimizers::decode_u128(minimizer, header.kmer_length);
+                writeln!(writer, ">{}", counter)?;
+                writeln!(writer, "{}", String::from_utf8_lossy(&sequence))?;
+            }
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn reader_with_inferred_batch_size(
+    in_path: Option<&Path>,
+) -> Result<paraseq::fastx::Reader<Box<dyn Read + Send>>> {
+    let mut reader = paraseq::fastx::Reader::from_optional_path(in_path).unwrap();
+    reader.update_batch_size_in_bp(256 * 1024)?;
+    Ok(reader)
+}
+
+#[derive(Clone)]
+struct BuildIndexProcessor<'c> {
+    config: &'c IndexConfig,
+    hasher: KmerHasher,
+    // Local buffers
+    buffers: Buffers,
+    local_stats: ProcessingStats,
+    local_minimizers_u64: Option<RapidHashSet<u64>>,
+    local_minimizers_u128: Option<RapidHashSet<u128>>,
+    local_record_info: Vec<(Vec<u8>, usize)>, // (record_id, seq_len) for progress output
+    // Global state
+    global_stats: Arc<Mutex<ProcessingStats>>,
+    global_minimizers_u64: Arc<Mutex<Option<RapidHashSet<u64>>>>,
+    global_minimizers_u128: Arc<Mutex<Option<RapidHashSet<u128>>>>,
+}
+
+impl<Rf: Record> ParallelProcessor<Rf> for BuildIndexProcessor<'_> {
+    fn process_record(&mut self, record: Rf) -> paraseq::parallel::Result<()> {
+        let seq = record.seq();
+        self.local_stats.total_seqs += 1;
+        self.local_stats.total_bp += seq.len() as u64;
+
+        crate::minimizers::fill_minimizers(
+            &seq,
+            &self.hasher,
+            self.config.kmer_length,
+            self.config.window_size,
+            self.config.entropy_threshold,
+            &mut self.buffers,
+        );
+
+        // Extend appropriate local set based on type
+        match &mut self.buffers.minimizers {
+            crate::MinimizerVec::U64(vec) => {
+                self.local_minimizers_u64
+                    .as_mut()
+                    .unwrap()
+                    .extend(vec.iter());
+            }
+            crate::MinimizerVec::U128(vec) => {
+                self.local_minimizers_u128
+                    .as_mut()
+                    .unwrap()
+                    .extend(vec.iter());
+            }
+        }
+
+        // Store record info for progress output (printed sequentially in on_batch_complete)
+        if !self.config.quiet {
+            self.local_record_info
+                .push((record.id().to_vec(), seq.len()));
+        }
+
+        Ok(())
+    }
+
+    fn on_batch_complete(&mut self) -> paraseq::parallel::Result<()> {
+        // Merge local minimizers into global set and get new total count
+        let minimizer_count = if let Some(local) = &mut self.local_minimizers_u64 {
+            let mut global = self.global_minimizers_u64.lock();
+            global.as_mut().unwrap().extend(local.iter());
+            local.clear();
+            global.as_ref().unwrap().len()
+        } else {
+            let mut global = self.global_minimizers_u128.lock();
+            global
+                .as_mut()
+                .unwrap()
+                .extend(self.local_minimizers_u128.as_ref().unwrap().iter());
+            self.local_minimizers_u128.as_mut().unwrap().clear();
+            global.as_ref().unwrap().len()
+        };
+
+        // Update global stats
+        {
+            let mut stats = self.global_stats.lock();
+            stats.total_seqs += self.local_stats.total_seqs;
+            stats.total_bp += self.local_stats.total_bp;
+            self.local_stats = ProcessingStats::default();
+        }
+
+        // Print progress for each record in this batch (sequentially, after merging)
+        if !self.config.quiet {
+            for (record_id, seq_len) in &self.local_record_info {
+                let id_str = std::str::from_utf8(record_id).unwrap_or("unknown");
+                eprintln!(
+                    "  {} ({}bp), total minimizers: {}",
+                    id_str, seq_len, minimizer_count
+                );
+            }
+            self.local_record_info.clear();
+        }
+
+        Ok(())
+    }
+}
+
 /// Build an index of minimizers from a fastx file
-pub fn build(
-    path: &PathBuf,
-    kmer_length: usize,
-    window_size: usize,
-    output: Option<PathBuf>,
-    capacity_millions: usize,
-    threads: usize,
-) -> Result<()> {
+pub fn build(config: &IndexConfig) -> Result<()> {
     let start_time = Instant::now();
+    let path = &config.input_path;
 
     let version: String = env!("CARGO_PKG_VERSION").to_string();
 
     // Build options string similar to filter
     let mut options = Vec::<String>::new();
-    options.push(format!("capacity={capacity_millions}M"));
-    if threads > 0 {
-        options.push(format!("threads={threads}"));
+    if config.threads > 0 {
+        options.push(format!("threads={}", config.threads));
     }
 
     eprintln!(
@@ -188,124 +422,205 @@ pub fn build(
         options.join(", ")
     );
 
-    // Ensure l = k + w - 1 is odd so that canonicalisation tie breaks work correctly
-    let l = kmer_length + window_size - 1;
-    if l % 2 == 0 {
-        return Err(anyhow::anyhow!(
-            "Constraint violated: k + w - 1 must be odd (k={}, w={})",
-            kmer_length,
-            window_size
-        ));
-    }
+    // Validate k-mer and window size constraints
+    config.validate()?;
 
-    // Configure thread pool if specified (non-zero)
-    if threads > 0 {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build_global()
-            .context("Failed to initialize thread pool")?;
-    }
-
-    // Create a fastx reader using needletail (handles gzip automatically)
-    let mut reader = parse_fastx_file(path).context("Failed to open input file")?;
-
-    // Init FxHashSet with user-specified capacity
-    let capacity = capacity_millions * 1_000_000;
-    let mut all_minimizers: FxHashSet<u64> =
-        FxHashSet::with_capacity_and_hasher(capacity, Default::default());
-
-    eprintln!("Building index (k={kmer_length}, w={window_size})");
-
-    let mut seq_count = 0;
-    let mut total_bp = 0;
-
-    // Process sequences in batches for parallelization
-    let batch_size = 10000;
-
-    loop {
-        // Collect a batch of sequences
-        let mut batch = Vec::with_capacity(batch_size);
-        let mut reached_end = false;
-
-        for _ in 0..batch_size {
-            if let Some(record_result) = reader.next() {
-                match record_result {
-                    Ok(record) => {
-                        let seq_data = record.seq().to_vec();
-                        let id = record.id().to_vec();
-                        batch.push((seq_data, id));
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
-                reached_end = true;
-                break;
-            }
-        }
-
-        if batch.is_empty() {
-            break;
-        }
-
-        // Process batch in parallel
-        let batch_results: Vec<_> = batch
-            .par_iter()
-            .map(|(seq_data, _id)| {
-                // Compute minimizer hashes for this sequence
-                crate::minimizers::compute_minimizer_hashes(seq_data, kmer_length, window_size)
-            })
-            .collect();
-
-        // Merge results sequentially (to avoid concurrent modification of hash set)
-        for (i, hashes) in batch_results.iter().enumerate() {
-            let (seq_data, id) = &batch[i];
-
-            all_minimizers.extend(hashes.iter());
-
-            seq_count += 1;
-            total_bp += seq_data.len();
-
-            let id_str = std::str::from_utf8(id).unwrap_or("unknown");
-            eprintln!(
-                "  {} ({}bp), total minimizers: {}",
-                id_str,
-                seq_data.len(),
-                all_minimizers.len()
-            );
-        }
-
-        // Check if we've reached the end of the file
-        if reached_end {
-            break;
-        }
-    }
+    let in_path = if path.as_os_str() == "-" {
+        None
+    } else {
+        Some(path.as_path())
+    };
+    let reader = reader_with_inferred_batch_size(in_path)?;
 
     eprintln!(
-        "Indexed {} minimizers from {} sequence(s) ({}bp)",
-        all_minimizers.len(),
-        seq_count,
-        total_bp
+        "Building index (k={}, w={})",
+        config.kmer_length, config.window_size
     );
 
-    let header = IndexHeader::new(kmer_length, window_size);
+    let mut processor = if config.kmer_length <= 32 {
+        BuildIndexProcessor {
+            config,
+            hasher: KmerHasher::new(config.kmer_length as usize),
+            local_stats: ProcessingStats::default(),
+            buffers: Buffers::new_u64(),
+            local_minimizers_u64: Some(RapidHashSet::default()),
+            local_minimizers_u128: None,
+            local_record_info: Vec::new(),
+            global_stats: Arc::new(Mutex::new(ProcessingStats::default())),
+            global_minimizers_u64: Arc::new(Mutex::new(Some(RapidHashSet::default()))),
+            global_minimizers_u128: Arc::new(Mutex::new(None)),
+        }
+    } else {
+        BuildIndexProcessor {
+            config,
+            hasher: KmerHasher::new(config.kmer_length as usize),
+            local_stats: ProcessingStats::default(),
+            buffers: Buffers::new_u128(),
+            local_minimizers_u64: None,
+            local_minimizers_u128: Some(RapidHashSet::default()),
+            local_record_info: Vec::new(),
+            global_stats: Arc::new(Mutex::new(ProcessingStats::default())),
+            global_minimizers_u64: Arc::new(Mutex::new(None)),
+            global_minimizers_u128: Arc::new(Mutex::new(Some(RapidHashSet::default()))),
+        }
+    };
+    reader.process_parallel(&mut processor, config.threads as usize)?;
+
+    let all_minimizers = if config.kmer_length <= 32 {
+        let set = Arc::try_unwrap(processor.global_minimizers_u64)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        crate::MinimizerSet::U64(set)
+    } else {
+        let set = Arc::try_unwrap(processor.global_minimizers_u128)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        crate::MinimizerSet::U128(set)
+    };
+    let stats = Arc::try_unwrap(processor.global_stats)
+        .unwrap()
+        .into_inner();
+
+    eprintln!(
+        "Indexed {} minimizers from {} record(s) ({}bp)",
+        all_minimizers.len(),
+        stats.total_seqs,
+        stats.total_bp
+    );
+
+    let header = IndexHeader::new(config.kmer_length, config.window_size);
 
     // Write to output path or stdout
-    write_minimizers(&all_minimizers, &header, output.as_ref())?;
+    dump_minimizers(&all_minimizers, &header, config.output_path.as_deref())?;
 
     let total_time = start_time.elapsed();
-    eprintln!("Completed in {total_time:.2?}");
+    eprintln!("Completed in {:.2?}", total_time);
 
     Ok(())
 }
 
+#[derive(Clone)]
+struct DiffIndexProcessor {
+    kmer_length: u8,
+    window_size: u8,
+    hasher: KmerHasher,
+    // Local buffers
+    buffers: Buffers,
+    local_stats: ProcessingStats,
+    local_minimizers_u64: Option<RapidHashSet<u64>>,
+    local_minimizers_u128: Option<RapidHashSet<u128>>,
+    // Global state
+    global_stats: Arc<Mutex<ProcessingStats>>,
+    initial_size: usize,
+    global_minimizers_u64: Arc<Mutex<Option<RapidHashSet<u64>>>>,
+    global_minimizers_u128: Arc<Mutex<Option<RapidHashSet<u128>>>>,
+}
+
+impl<Rf: Record> ParallelProcessor<Rf> for DiffIndexProcessor {
+    fn process_record(&mut self, record: Rf) -> paraseq::parallel::Result<()> {
+        let seq = record.seq();
+        self.local_stats.total_seqs += 1;
+        self.local_stats.total_bp += seq.len() as u64;
+
+        crate::minimizers::fill_minimizers(
+            &seq,
+            &self.hasher,
+            self.kmer_length,
+            self.window_size,
+            0.0,
+            &mut self.buffers,
+        );
+
+        // Extend appropriate local set based on type
+        match &mut self.buffers.minimizers {
+            crate::MinimizerVec::U64(vec) => {
+                self.local_minimizers_u64
+                    .as_mut()
+                    .unwrap()
+                    .extend(vec.iter());
+            }
+            crate::MinimizerVec::U128(vec) => {
+                self.local_minimizers_u128
+                    .as_mut()
+                    .unwrap()
+                    .extend(vec.iter());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_batch_complete(&mut self) -> paraseq::parallel::Result<()> {
+        // Write buffer to output
+        let len = if let Some(local) = &mut self.local_minimizers_u64 {
+            let mut global = self.global_minimizers_u64.lock();
+            let global_set = global.as_mut().unwrap();
+            for &minimizer in local.iter() {
+                global_set.remove(&minimizer);
+            }
+            let len = global_set.len();
+            local.clear();
+            len
+        } else {
+            let mut global = self.global_minimizers_u128.lock();
+            let global_set = global.as_mut().unwrap();
+            for &minimizer in self.local_minimizers_u128.as_ref().unwrap().iter() {
+                global_set.remove(&minimizer);
+            }
+            let len = global_set.len();
+            self.local_minimizers_u128.as_mut().unwrap().clear();
+            len
+        };
+
+        // Update global stats
+        {
+            let mut stats = self.global_stats.lock();
+            stats.total_seqs += self.local_stats.total_seqs;
+            stats.total_bp += self.local_stats.total_bp;
+
+            let current_gb = stats.total_bp / 1_000_000_000;
+            if current_gb > stats.last_reported {
+                eprintln!(
+                    "  Processed {} sequences ({}bp), removed {} minimizers",
+                    stats.total_seqs,
+                    stats.total_bp,
+                    self.initial_size - len
+                );
+                stats.last_reported = current_gb;
+            }
+
+            self.local_stats = ProcessingStats::default();
+        }
+
+        Ok(())
+    }
+}
+
 /// Stream minimizers from a FASTX file or stdin and remove those present in first_minimizers
 fn stream_diff_fastx(
-    path: &PathBuf,
-    kmer_length: usize,
-    window_size: usize,
+    fastx_path: &Path,
+    kmer_length: u8,
+    window_size: u8,
     first_header: &IndexHeader,
-    first_minimizers: &mut FxHashSet<u64>,
+    threads: u16,
+    first_minimizers: &mut crate::MinimizerSet,
 ) -> Result<(usize, usize)> {
+    let path = fastx_path;
+
+    // Validate k-mer and window size constraints
+    let temp_config = crate::IndexConfig {
+        input_path: PathBuf::new(),
+        kmer_length,
+        window_size,
+        output_path: None,
+        threads: 0,
+        quiet: false,
+        entropy_threshold: 0.0,
+    };
+    temp_config.validate()?;
+
     // Validate parameters match the first index
     if kmer_length != first_header.kmer_length() || window_size != first_header.window_size() {
         return Err(anyhow::anyhow!(
@@ -317,111 +632,106 @@ fn stream_diff_fastx(
         ));
     }
 
-    if path.to_string_lossy() == "-" {
-        eprintln!("Second index: processing FASTX from stdin (k={kmer_length}, w={window_size})…");
+    if path.as_os_str() == "-" {
+        eprintln!(
+            "Second index: processing FASTX from stdin (k={}, w={})…",
+            kmer_length, window_size
+        );
     } else {
-        eprintln!("Second index: processing FASTX from file (k={kmer_length}, w={window_size})…");
+        eprintln!(
+            "Second index: processing FASTX from file (k={}, w={})…",
+            kmer_length, window_size
+        );
     }
 
-    // Create a fastx reader
-    let mut reader = if path.to_string_lossy() == "-" {
-        parse_fastx_stdin().context("Failed to parse FASTX from stdin")?
+    let in_path = if path.as_os_str() == "-" {
+        None
     } else {
-        parse_fastx_file(path).context("Failed to open FASTX file")?
+        Some(path)
     };
 
-    let mut seq_count = 0;
-    let mut total_bp = 0;
-    let mut removed_count = 0;
-    let mut last_reported_gb = 0;
+    let reader = reader_with_inferred_batch_size(in_path)?;
 
-    // Process sequences in batches for parallelization
-    let batch_size = 1000;
-
-    loop {
-        // Collect a batch of sequences
-        let mut batch = Vec::with_capacity(batch_size);
-        let mut reached_end = false;
-
-        for _ in 0..batch_size {
-            if let Some(record_result) = reader.next() {
-                match record_result {
-                    Ok(record) => {
-                        let seq_data = record.seq().to_vec();
-                        let id = record.id().to_vec();
-                        batch.push((seq_data, id));
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            } else {
-                reached_end = true;
-                break;
-            }
+    // Move first_minimizers into Arc<Mutex<>> for parallel access
+    let initial_size = first_minimizers.len();
+    let (mut processor, global_minimizers_u64, global_minimizers_u128) = match first_minimizers {
+        crate::MinimizerSet::U64(set) => {
+            let moved_set = std::mem::take(set);
+            let arc = Arc::new(Mutex::new(Some(moved_set)));
+            (
+                DiffIndexProcessor {
+                    kmer_length,
+                    window_size,
+                    hasher: KmerHasher::new(kmer_length as usize),
+                    local_stats: ProcessingStats::default(),
+                    buffers: Buffers::new_u64(),
+                    local_minimizers_u64: Some(RapidHashSet::default()),
+                    local_minimizers_u128: None,
+                    global_stats: Arc::new(Mutex::new(ProcessingStats::default())),
+                    initial_size,
+                    global_minimizers_u64: arc.clone(),
+                    global_minimizers_u128: Arc::new(Mutex::new(None)),
+                },
+                Some(arc),
+                None,
+            )
         }
-
-        if batch.is_empty() {
-            break;
+        crate::MinimizerSet::U128(set) => {
+            let moved_set = std::mem::take(set);
+            let arc = Arc::new(Mutex::new(Some(moved_set)));
+            (
+                DiffIndexProcessor {
+                    kmer_length,
+                    window_size,
+                    hasher: KmerHasher::new(kmer_length as usize),
+                    local_stats: ProcessingStats::default(),
+                    buffers: Buffers::new_u128(),
+                    local_minimizers_u64: None,
+                    local_minimizers_u128: Some(RapidHashSet::default()),
+                    global_stats: Arc::new(Mutex::new(ProcessingStats::default())),
+                    initial_size,
+                    global_minimizers_u64: Arc::new(Mutex::new(None)),
+                    global_minimizers_u128: arc.clone(),
+                },
+                None,
+                Some(arc),
+            )
         }
+    };
 
-        // Process batch in parallel
-        let batch_results: Vec<_> = batch
-            .par_iter()
-            .map(|(seq_data, _id)| {
-                // Compute minimizer hashes for this sequence
-                crate::minimizers::compute_minimizer_hashes(seq_data, kmer_length, window_size)
-            })
-            .collect();
+    reader.process_parallel(&mut processor, threads as usize)?;
 
-        // Stream removal: remove minimizers as we find them
-        for (i, hashes) in batch_results.iter().enumerate() {
-            let (seq_data, _id) = &batch[i];
+    // Extract results from Arc<Mutex<>> after processing completes
+    let stats = processor.global_stats.lock().clone();
+    *first_minimizers = if let Some(arc) = global_minimizers_u64 {
+        let set = arc.lock().take().unwrap();
+        crate::MinimizerSet::U64(set)
+    } else {
+        let set = global_minimizers_u128.unwrap().lock().take().unwrap();
+        crate::MinimizerSet::U128(set)
+    };
 
-            // Remove matching minimizers from first_minimizers immediately
-            for &hash in hashes {
-                if first_minimizers.remove(&hash) {
-                    removed_count += 1;
-                }
-            }
+    eprintln!(
+        "Processed {} sequences ({}bp) from FASTX file",
+        stats.total_seqs, stats.total_bp
+    );
 
-            seq_count += 1;
-            total_bp += seq_data.len();
-
-            let current_gb = total_bp / 1_000_000_000;
-            if current_gb > last_reported_gb {
-                eprintln!(
-                    "  Processed {seq_count} sequences ({total_bp}bp), removed {removed_count} minimizers"
-                );
-                last_reported_gb = current_gb;
-            }
-        }
-
-        // Check if we've reached the end of the file
-        if reached_end {
-            break;
-        }
-    }
-
-    eprintln!("Processed {seq_count} sequences ({total_bp}bp) from FASTX file");
-
-    Ok((seq_count, total_bp))
+    Ok((stats.total_seqs as usize, stats.total_bp as usize))
 }
 
 /// Compute the set difference between two minimizer indexes (A - B)
 pub fn diff(
-    first: &PathBuf,
-    second: &PathBuf,
-    kmer_length: Option<usize>,
-    window_size: Option<usize>,
-    output: Option<&PathBuf>,
+    first: &Path,
+    second: &Path,
+    kmer_length: Option<u8>,
+    window_size: Option<u8>,
+    threads: u16,
+    output: Option<&Path>,
 ) -> Result<()> {
     let start_time = Instant::now();
 
     // Load first file (always an index)
-    let (first_minimizers, header) = load_minimizer_hashes(&Some(first), &None)?;
-    if first_minimizers.is_none() {
-        return Err(anyhow::anyhow!("Failed to load first index file"));
-    }
-    let mut first_minimizers = first_minimizers.unwrap();
+    let (mut first_minimizers, header) = load_minimizers(first)?;
     eprintln!("First index: loaded {} minimizers", first_minimizers.len());
 
     // Guess if second file is an index or FASTX file
@@ -429,7 +739,7 @@ pub fn diff(
         // Second file is a FASTX file - stream diff with provided k, w
         let before_count = first_minimizers.len();
         let (_seq_count, _total_bp) =
-            stream_diff_fastx(second, k, w, &header, &mut first_minimizers)?;
+            stream_diff_fastx(second, k, w, &header, threads, &mut first_minimizers)?;
 
         // Report results
         eprintln!(
@@ -438,20 +748,15 @@ pub fn diff(
             first_minimizers.len()
         );
 
-        write_minimizers(&first_minimizers, &header, output)?;
+        dump_minimizers(&first_minimizers, &header, output)?;
 
         let total_time = start_time.elapsed();
-        eprintln!("Completed difference operation in {total_time:.2?}");
+        eprintln!("Completed difference operation in {:.2?}", total_time);
 
         return Ok(());
     } else {
         // Try to load as index file first
-        if let Ok((second_minimizers, second_header)) = load_minimizer_hashes(&Some(second), &None)
-        {
-            if second_minimizers.is_none() {
-                return Err(anyhow::anyhow!("Failed to load second index file"));
-            }
-            let second_minimizers = second_minimizers.unwrap();
+        if let Ok((second_minimizers, second_header)) = load_minimizers(&second) {
             // Second file is an index file
             eprintln!(
                 "Second index: loaded {} minimizers",
@@ -477,16 +782,12 @@ pub fn diff(
             // Use k and w from first index header and do a streaming diff
             let k = header.kmer_length();
             let w = header.window_size();
-            // eprintln!(
-            //     "Second index is not valid, treating as FASTX and extracting minimizers (k={}, w={})",
-            //     k, w
-            // );
 
             // Count minimizers before diff
             let before_count = first_minimizers.len();
 
             let (_seq_count, _total_bp) =
-                stream_diff_fastx(second, k, w, &header, &mut first_minimizers)?;
+                stream_diff_fastx(&second, k, w, &header, threads, &mut first_minimizers)?;
 
             // Report results
             eprintln!(
@@ -495,10 +796,10 @@ pub fn diff(
                 first_minimizers.len()
             );
 
-            write_minimizers(&first_minimizers, &header, output)?;
+            dump_minimizers(&first_minimizers, &header, output)?;
 
             let total_time = start_time.elapsed();
-            eprintln!("Completed difference operation in {total_time:.2?}");
+            eprintln!("Completed difference operation in {:.2?}", total_time);
 
             return Ok(());
         }
@@ -508,10 +809,8 @@ pub fn diff(
     // Count minimizers before diff
     let before_count = first_minimizers.len();
 
-    // Remove all hashes in second_minimizers from first_minimizers
-    for hash in &second_minimizers {
-        first_minimizers.remove(hash);
-    }
+    // Remove all minimizers in second_minimizers from first_minimizers
+    first_minimizers.remove_all(&second_minimizers);
 
     // Report results
     eprintln!(
@@ -520,24 +819,21 @@ pub fn diff(
         first_minimizers.len()
     );
 
-    write_minimizers(&first_minimizers, &header, output)?;
+    dump_minimizers(&first_minimizers, &header, output)?;
 
     let total_time = start_time.elapsed();
-    eprintln!("Completed diff operation in {total_time:.2?}");
+    eprintln!("Completed diff operation in {:.2?}", total_time);
 
     Ok(())
 }
 
 /// Show info about an index
-pub fn info(index_path: &PathBuf) -> Result<()> {
+pub fn info(index_path: &Path) -> Result<()> {
     let start_time = Instant::now();
 
     // Load index file
-    let (minimizers, header) = load_minimizer_hashes(&Some(index_path), &None)?;
-    if minimizers.is_none() {
-        return Err(anyhow::anyhow!("Failed to load index file"));
-    }
-    let minimizers = minimizers.unwrap();
+    let (minimizers, header) = load_minimizers(index_path)?;
+
     // Show index info
     eprintln!("Index information:");
     eprintln!("  Format version: {}", header.format_version);
@@ -546,13 +842,13 @@ pub fn info(index_path: &PathBuf) -> Result<()> {
     eprintln!("  Distinct minimizer count: {}", minimizers.len());
 
     let total_time = start_time.elapsed();
-    eprintln!("Retrieved index info in {total_time:.2?}");
+    eprintln!("Loaded index info in {:.2?}", total_time);
 
     Ok(())
 }
 
 /// Combine minimizer indexes (set union)
-pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
+pub fn union(inputs: &[PathBuf], output: Option<&Path>) -> Result<()> {
     let start_time = Instant::now();
     // Check input files
     if inputs.is_empty() {
@@ -563,11 +859,9 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
 
     // Read all headers first to determine total capacity needed
     let mut headers_and_counts = Vec::new();
-    let mut total_capacity = 0;
 
     for path in inputs {
         let (header, count) = load_header_and_count(path)?;
-        total_capacity += count;
         headers_and_counts.push((header, count));
     }
 
@@ -575,14 +869,9 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
     let header = &headers_and_counts[0].0;
 
     eprintln!(
-        "Performing union of indexes (k={}, w={})",
+        "Combining indexes (k={}, w={})",
         header.kmer_length(),
         header.window_size()
-    );
-    eprintln!(
-        "Pre-allocating capacity for {} minimizers across {} indexes",
-        total_capacity,
-        inputs.len()
     );
 
     // Verify all headers are compatible
@@ -601,25 +890,21 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
         }
     }
 
-    // Pre-allocate hash set with total capacity to avoid resizing
-    let mut all_minimizers: FxHashSet<u64> =
-        FxHashSet::with_capacity_and_hasher(total_capacity, Default::default());
+    // Load first index to determine type (u64 vs u128)
+    let (mut all_minimizers, _) = load_minimizers(&inputs[0])?;
+    eprintln!("Index 1: loaded {} minimizers", all_minimizers.len());
 
-    // Now load and merge all indexes
-    for (i, path) in inputs.iter().enumerate() {
-        let (minimizers, _) = load_minimizer_hashes(&Some(path), &None)?;
+    // Now load and merge remaining indexes
+    for (i, path) in inputs.iter().enumerate().skip(1) {
+        let (minimizers, _) = load_minimizers(path)?;
         let before_count = all_minimizers.len();
-        if minimizers.is_none() {
-            return Err(anyhow::anyhow!("Failed to load index file {:?}", path));
-        }
-        let minimizers = minimizers.unwrap();
 
         // Merge minimizers (set union)
         all_minimizers.extend(minimizers);
 
         let expected_count = headers_and_counts[i].1;
         eprintln!(
-            "Index {}: expected {} minimizers, added {} new, total: {}",
+            "Index {}: {} minimizers, added {}, total: {}",
             i + 1,
             expected_count,
             all_minimizers.len() - before_count,
@@ -627,13 +912,89 @@ pub fn union(inputs: &[PathBuf], output: Option<&PathBuf>) -> Result<()> {
         );
     }
 
-    write_minimizers(&all_minimizers, header, output)?;
+    dump_minimizers(&all_minimizers, header, output)?;
 
     let total_time = start_time.elapsed();
     eprintln!(
         "United {} indexes with {} total minimizers in {:.2?}",
         inputs.len(),
         all_minimizers.len(),
+        total_time
+    );
+
+    Ok(())
+}
+
+pub fn intersect(inputs: &[PathBuf], output: Option<&Path>) -> Result<()> {
+    let start_time = Instant::now();
+    // Check inputs
+    if inputs.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "At least two input files are required for intersection operation"
+        ));
+    }
+
+    // Read all headers first
+    let mut headers_and_counts = Vec::new();
+
+    for path in inputs {
+        let (header, count) = load_header_and_count(path)?;
+        headers_and_counts.push((header, count));
+    }
+
+    // Get header from first file for output
+    let header = &headers_and_counts[0].0;
+
+    eprintln!(
+        "Intersecting indexes (k={}, w={})",
+        header.kmer_length(),
+        header.window_size()
+    );
+
+    // Check header compat
+    for (i, (file_header, _)) in headers_and_counts.iter().enumerate() {
+        if file_header.kmer_length() != header.kmer_length()
+            || file_header.window_size() != header.window_size()
+        {
+            return Err(anyhow::anyhow!(
+                "Incompatible headers: index {} has k={}, w={}, but first index has k={}, w={}",
+                i,
+                file_header.kmer_length(),
+                file_header.window_size(),
+                header.kmer_length(),
+                header.window_size()
+            ));
+        }
+    }
+
+    // Load first index
+    let (mut result_minimizers, _) = load_minimizers(&inputs[0])?;
+    eprintln!("Index 1: loaded {} minimizers", result_minimizers.len());
+
+    // Intersect with remaining indexes
+    for (i, path) in inputs.iter().enumerate().skip(1) {
+        let (minimizers, _) = load_minimizers(path)?;
+
+        // Intersect minimizers (set intersection)
+        result_minimizers.intersect(&minimizers);
+
+        let expected_count = headers_and_counts[i].1;
+        eprintln!(
+            "Index {}: {} minimizers, retained {}, total: {}",
+            i + 1,
+            expected_count,
+            result_minimizers.len(),
+            result_minimizers.len()
+        );
+    }
+
+    dump_minimizers(&result_minimizers, header, output)?;
+
+    let total_time = start_time.elapsed();
+    eprintln!(
+        "Intersected {} indexes with {} common minimizers in {:.2?}",
+        inputs.len(),
+        result_minimizers.len(),
         total_time
     );
 
@@ -648,27 +1009,132 @@ mod tests {
     fn test_header_creation() {
         let header = IndexHeader::new(31, 21);
 
-        assert_eq!(header.format_version, 2);
+        assert_eq!(header.format_version, 3);
         assert_eq!(header.kmer_length(), 31);
         assert_eq!(header.window_size(), 21);
     }
 
     #[test]
     fn test_header_validation() {
-        // Valid header
-        let valid_header = IndexHeader {
+        // Valid header (v3 only)
+        let valid_header_v3 = IndexHeader {
+            format_version: 3,
+            kmer_length: 31,
+            window_size: 21,
+        };
+        assert!(valid_header_v3.validate().is_ok());
+
+        // Invalid format versions
+        let invalid_header_v1 = IndexHeader {
+            format_version: 1,
+            kmer_length: 31,
+            window_size: 21,
+        };
+        assert!(invalid_header_v1.validate().is_err());
+
+        let invalid_header_v2 = IndexHeader {
             format_version: 2,
             kmer_length: 31,
             window_size: 21,
         };
-        assert!(valid_header.validate().is_ok());
+        assert!(invalid_header_v2.validate().is_err());
 
-        // Invalid format version
-        let invalid_header = IndexHeader {
-            format_version: 1, // Unsupported version
+        let invalid_header_v4 = IndexHeader {
+            format_version: 4,
             kmer_length: 31,
             window_size: 21,
         };
-        assert!(invalid_header.validate().is_err());
+        assert!(invalid_header_v4.validate().is_err());
+
+        // Test k <= 61 constraint
+        let valid_max_k = IndexHeader {
+            format_version: 3,
+            kmer_length: 61,
+            window_size: 15,
+        };
+        assert!(valid_max_k.validate().is_ok()); // k=61 is valid
+
+        let invalid_max_k = IndexHeader {
+            format_version: 3,
+            kmer_length: 63,
+            window_size: 15,
+        };
+        assert!(invalid_max_k.validate().is_err()); // k=63 exceeds 61
+
+        // Test k+w <= 96 constraint
+        let valid_max_kw = IndexHeader {
+            format_version: 3,
+            kmer_length: 61,
+            window_size: 35,
+        };
+        assert!(valid_max_kw.validate().is_ok()); // k+w=96 is valid
+
+        let invalid_max_kw = IndexHeader {
+            format_version: 3,
+            kmer_length: 61,
+            window_size: 36,
+        };
+        assert!(invalid_max_kw.validate().is_err()); // k+w=97 exceeds 96
+
+        // Test k must be odd
+        let invalid_even = IndexHeader {
+            format_version: 3,
+            kmer_length: 30,
+            window_size: 15,
+        };
+        assert!(invalid_even.validate().is_err()); // k=30 is even
     }
+}
+
+/// Fetch a pre-built index from remote storage
+pub fn fetch(
+    index_name: &str,
+    kmer_length: u8,
+    window_size: u8,
+    output: Option<&Path>,
+) -> Result<()> {
+    const DEFAULT_REPOSITORY_URL: &str =
+        "https://objectstorage.uk-london-1.oraclecloud.com/n/lrbvkel2wjot/b/human-genome-bucket/o";
+
+    let base_url = std::env::var("DEACON_REPOSITORY_URL")
+        .unwrap_or_else(|_| DEFAULT_REPOSITORY_URL.to_string());
+
+    let filename = format!("{}.k{}w{}.idx", index_name, kmer_length, window_size);
+    let url = format!("{}/deacon/{}/{}", base_url, INDEX_FORMAT_VERSION, filename);
+
+    eprintln!("Fetching {}", url);
+
+    let mut response = minreq::get(&url)
+        .send_lazy()
+        .context("Failed to download index")?;
+
+    if response.status_code != 200 {
+        anyhow::bail!("Failed to fetch index: HTTP {}", response.status_code);
+    }
+
+    let content_length = response
+        .headers
+        .get("content-length")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let pb = ProgressBar::new(content_length);
+
+    let output_path = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(&filename));
+
+    let mut temp_path = output_path.clone();
+    temp_path.as_mut_os_string().push(".tmp");
+
+    let mut file = File::create(&temp_path).context("Failed to create temporary file")?;
+    std::io::copy(&mut pb.wrap_read(&mut response), &mut file)
+        .context("Failed to write index to file")?;
+
+    std::fs::rename(&temp_path, &output_path).context("Failed to finalise index")?;
+
+    pb.finish_and_clear();
+    eprintln!("Index saved to: {}", output_path.display());
+
+    Ok(())
 }

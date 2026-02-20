@@ -2,19 +2,19 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use crate::MinimizerSet;
 use crate::filter::inputs_should_be_output;
-use crate::index::{IndexHeader, load_minimizer_hashes};
+use crate::index::{IndexHeader, load_minimizers_cached};
 use crate::server_common::{FilterRequest, FilterResponse};
 use axum::{
     Json, Router,
     extract::DefaultBodyLimit,
     routing::{get, post},
 };
-use rustc_hash::FxHashSet;
 
 /// Shared index file between endpoint calls.
 /// Annoyingly, we have to use an Option as the default/empty FxHashSet is not static
-static INDEX: Mutex<Option<FxHashSet<u64>>> = Mutex::new(None);
+static INDEX: Mutex<Option<MinimizerSet>> = Mutex::new(None);
 
 /// Shared index header between endpoint calls.
 /// Initalised to a dummy value, which will be replaced when the index is loaded.
@@ -70,7 +70,7 @@ fn load_index(index_path: PathBuf) {
     let hash = sha256::digest(&bytes);
     *INDEX_HASH.lock().unwrap() = Some(index_path.clone().into_os_string().into_string().unwrap() + "@" + &hash);
 
-    let result = load_minimizer_hashes(&Some(&index_path), &None);
+    let result = load_minimizers_cached(Some(&index_path), &None);
     match result {
         Ok((minimizers, header)) => {
             *INDEX.lock().unwrap() = minimizers;
