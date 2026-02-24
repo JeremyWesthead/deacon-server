@@ -1,3 +1,4 @@
+use crate::FixedRapidHasher;
 use crate::MinimizerSet;
 use crate::index::load_minimizers_cached;
 use crate::minimizers::KmerHasher;
@@ -24,6 +25,7 @@ use rayon::prelude::*;
 #[cfg(feature = "server")]
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -400,9 +402,9 @@ fn should_keep_sequence(
     rel_threshold: f64,
     deplete: bool,
     debug: bool,
-) -> (bool, usize, usize, Vec<String>) {
+) -> (bool, HashSet<u128, FixedRapidHasher>, usize, Vec<String>) {
     if seq.len() < kmer_length as usize {
-        return (deplete, 0, 0, Vec::new()); // If too short, keep if in deplete mode
+        return (deplete, crate::RapidHashSet::default(), 0, Vec::new()); // If too short, keep if in deplete mode
     }
 
     let hasher = KmerHasher::new(kmer_length as usize);
@@ -424,17 +426,17 @@ fn should_keep_sequence(
     let num_minimizers = minimizers.len();
 
     // Count distinct minimizer hits based on variant
-    let (hit_count, hit_kmers) = match (minimizers, ref_minimizers) {
+    let (hits, hit_kmers) = match (minimizers, ref_minimizers) {
         (crate::MinimizerVec::U64(vec), MinimizerSet::U64(set)) => {
             let mut seen_hits = crate::RapidHashSet::default();
             let mut hit_kmers = Vec::new();
             for &minimizer in vec {
-                if set.contains(&minimizer) && seen_hits.insert(minimizer) && debug {
+                if set.contains(&minimizer) && seen_hits.insert(minimizer as u128) && debug {
                     let kmer = decode_u64(minimizer, kmer_length);
                     hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
                 }
             }
-            (seen_hits.len(), hit_kmers)
+            (seen_hits, hit_kmers)
         }
         (crate::MinimizerVec::U128(vec), MinimizerSet::U128(set)) => {
             let mut seen_hits = crate::RapidHashSet::default();
@@ -445,20 +447,22 @@ fn should_keep_sequence(
                     hit_kmers.push(String::from_utf8_lossy(&kmer).to_string());
                 }
             }
-            (seen_hits.len(), hit_kmers)
+            (seen_hits, hit_kmers)
         }
         _ => panic!("Mismatch between MinimizerVec and MinimizerSet types"),
     };
 
     (
         meets_filtering_criteria(
-            hit_count,
+            hits.len(),
             num_minimizers,
             abs_threshold,
             rel_threshold,
             deplete,
         ),
-        hit_count,
+        // Little bit hacky, but return full set here so the paired function can combine hits across pairs without needing to re-check against the set
+        // Avoids duplication of most of the logic in this function 2x for paired processing
+        hits,
         num_minimizers,
         hit_kmers,
     )
@@ -478,7 +482,7 @@ fn should_keep_pair(
     debug: bool,
 ) -> (bool, usize, usize, Vec<String>) {
     // Process both sequences and count distinct hits
-    let (_, hit_count1, num_minimizers1, hit_kmers1) = should_keep_sequence(
+    let (_, hits1, num_minimizers1, hit_kmers1) = should_keep_sequence(
         ref_minimizers,
         seq1,
         kmer_length,
@@ -489,7 +493,7 @@ fn should_keep_pair(
         deplete,
         debug,
     );
-    let (_, hit_count2, num_minimizers2, hit_kmers2) = should_keep_sequence(
+    let (_, hits2, num_minimizers2, hit_kmers2) = should_keep_sequence(
         ref_minimizers,
         seq2,
         kmer_length,
@@ -500,8 +504,12 @@ fn should_keep_pair(
         deplete,
         debug,
     );
+    let hits = hits1
+        .union(&hits2)
+        .cloned()
+        .collect::<HashSet<u128, FixedRapidHasher>>();
 
-    let hit_count = hit_count1 + hit_count2;
+    let hit_count = hits.len();
     let num_minimizers = num_minimizers1 + num_minimizers2;
     let hit_kmers = [hit_kmers1, hit_kmers2].concat();
 
@@ -705,7 +713,7 @@ pub fn check_paired_inputs_should_be_output(
 
             // Send the minimizers as a POST request
             let response = client
-                .post(server_address.to_owned() + "/filter_sequences")
+                .post(server_address.to_owned() + "/filter_paired_sequences")
                 .json(&FilterPairedSequencesRequest {
                     sequences: seqs.clone(),
                     abs_threshold,

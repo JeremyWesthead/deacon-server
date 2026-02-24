@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -6,28 +6,30 @@ use std::process::Command as StdCommand;
 use tempfile::tempdir;
 
 fn create_test_fasta(path: &Path) {
-    let fasta_content = ">seq1\nACGTACGTACGT\n>seq2\nGTACGTACGTAC\n";
+    let fasta_content = ">seq1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n>seq2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n";
+    fs::write(path, fasta_content).unwrap();
+}
+
+fn create_test_fasta_aaa(path: &Path) {
+    let fasta_content = ">seq1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
     fs::write(path, fasta_content).unwrap();
 }
 
 fn create_test_fastq(path: &Path) {
-    let fastq_content =
-        "@seq1\nACGTACGTACGT\n+\n~~~~~~~~~~~~\n@seq2\nGTACGTACGTAC\n+\n~~~~~~~~~~~~\n";
+    let fastq_content = "@seq1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@seq2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
     fs::write(path, fastq_content).unwrap();
 }
 
 fn create_test_paired_fastq(path1: &Path, path2: &Path) {
-    let fastq_content1 =
-        "@read1\nACGTACGTACGT\n+\n~~~~~~~~~~~~\n@read2\nGTACGTACGTAC\n+\n~~~~~~~~~~~~\n";
-    let fastq_content2 =
-        "@read1\nTGCATGCATGCA\n+\n~~~~~~~~~~~~\n@read2\nCATGCATGCATG\n+\n~~~~~~~~~~~~\n";
+    let fastq_content1 = "@read1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
+    let fastq_content2 = "@read1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
 
     fs::write(path1, fastq_content1).unwrap();
     fs::write(path2, fastq_content2).unwrap();
 }
 
 fn build_index(fasta_path: &Path, bin_path: &Path) {
-    let output = StdCommand::new(assert_cmd::cargo::cargo_bin("deacon"))
+    let output = StdCommand::new(cargo::cargo_bin!("deacon"))
         .arg("index")
         .arg("build")
         .arg(fasta_path)
@@ -95,14 +97,14 @@ fn test_filter_to_file() {
     let output_path = temp_dir.path().join("filtered.fastq");
     let summary_path = temp_dir.path().join("summary.json");
 
-    create_test_fasta(&fasta_path);
+    create_test_fasta_aaa(&fasta_path);
     create_test_fastq(&fastq_path);
 
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    // Run filtering command - sequences too short for k=31, so no matches, will be filtered out
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    // Run filtering command
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -137,7 +139,7 @@ fn test_filter_to_file_gzip() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -166,7 +168,7 @@ fn test_filter_to_file_zstd() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -195,7 +197,7 @@ fn test_filter_to_file_xz() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -224,7 +226,7 @@ fn test_filter_deplete_flag() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -252,11 +254,13 @@ fn test_filter_rename() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--rename")
-        .arg("-m")
-        .arg("0")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
         .arg(&bin_path)
         .arg(&fastq_path)
         .arg("--output")
@@ -288,10 +292,12 @@ fn test_filter_min_matches() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
         .arg("2")
+        .arg("--rel-threshold")
+        .arg("0.01")
         .arg(&bin_path)
         .arg(&fastq_path)
         .arg("--output")
@@ -317,7 +323,7 @@ fn test_filter_prefix_length() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--prefix-length")
         .arg("6")
@@ -349,11 +355,13 @@ fn test_filter_paired() {
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    // Run filtering command with paired-end reads (using -m 0 so short sequences pass through)
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    // Run filtering command with paired-end reads (using -a 1 so short sequences pass through)
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("-m")
-        .arg("0")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
         .arg(&bin_path)
         .arg(&fastq_path1)
         .arg(&fastq_path2)
@@ -383,7 +391,7 @@ fn test_filter_paired_with_deplete() {
     create_test_paired_fastq(&fastq_path1, &fastq_path2);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -413,11 +421,13 @@ fn test_filter_paired_with_rename() {
     create_test_paired_fastq(&fastq_path1, &fastq_path2);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--rename")
-        .arg("-m")
-        .arg("0")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
         .arg(&bin_path)
         .arg(&fastq_path1)
         .arg(&fastq_path2)
@@ -451,10 +461,12 @@ fn test_filter_paired_with_min_matches() {
     create_test_paired_fastq(&fastq_path1, &fastq_path2);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
         .arg("2")
+        .arg("--rel-threshold")
+        .arg("0.01")
         .arg(&bin_path)
         .arg(&fastq_path1)
         .arg(&fastq_path2)
@@ -470,7 +482,7 @@ fn test_filter_paired_with_min_matches() {
 }
 
 #[test]
-fn test_interleaved_paired_reads() {
+fn test_interleaved_paired_reads_stdin() {
     let temp_dir = tempdir().unwrap();
     let fasta_path = temp_dir.path().join("ref.fasta");
     let interleaved_fastq_path = temp_dir.path().join("interleaved_reads.fastq");
@@ -481,20 +493,22 @@ fn test_interleaved_paired_reads() {
     create_test_fasta(&fasta_path);
 
     let interleaved_content =
-        "@read1/1\nACGTACGTACGT\n+\n~~~~~~~~~~~~\n@read1/2\nTGCATGCATGCA\n+\n~~~~~~~~~~~~\n"
+        "@read1/1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read1/2\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
             .to_owned()
-            + "@read2/1\nGTACGTACGTAC\n+\n~~~~~~~~~~~~\n@read2/2\nCATGCATGCATG\n+\n~~~~~~~~~~~~\n";
+            + "@read2/1\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2/2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
     fs::write(&interleaved_fastq_path, interleaved_content).unwrap();
 
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
     // Test piping interleaved file to stdin for processing
-    let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin("deacon"));
+    let mut cmd = StdCommand::new(cargo::cargo_bin!("deacon"));
     let output = cmd
         .arg("filter")
-        .arg("-m")
-        .arg("0")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
         .arg(&bin_path)
         .arg("-") // stdin for input
         .arg("-") // stdin for input2 (signals interleaved mode)
@@ -513,6 +527,154 @@ fn test_interleaved_paired_reads() {
 }
 
 #[test]
+fn test_interleaved_paired_reads_stdin_separate_out() {
+    let temp_dir = tempdir().unwrap();
+    let fasta_path = temp_dir.path().join("ref.fasta");
+    let interleaved_fastq_path = temp_dir.path().join("interleaved_reads.fastq");
+    let bin_path = temp_dir.path().join("ref.bin");
+    let output_path1 = temp_dir.path().join("filtered_R1.fastq");
+    let output_path2 = temp_dir.path().join("filtered_R2.fastq");
+
+    // Create test files
+    create_test_fasta(&fasta_path);
+
+    let interleaved_content =
+        "@read1/1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read1/2\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+            .to_owned()
+            + "@read2/1\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2/2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
+    fs::write(&interleaved_fastq_path, interleaved_content).unwrap();
+
+    build_index(&fasta_path, &bin_path);
+    assert!(bin_path.exists(), "Index file wasn't created");
+
+    // Test piping interleaved file to stdin with separate output files
+    let mut cmd = StdCommand::new(cargo::cargo_bin!("deacon"));
+    let output = cmd
+        .arg("filter")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
+        .arg(&bin_path)
+        .arg("-") // stdin for input
+        .arg("-") // stdin for input2 (signals interleaved mode)
+        .arg("-o")
+        .arg(&output_path1)
+        .arg("-O")
+        .arg(&output_path2)
+        .stdin(File::open(&interleaved_fastq_path).unwrap())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_path1.exists(), "Output R1 file wasn't created");
+    assert!(output_path2.exists(), "Output R2 file wasn't created");
+
+    // Validate that R1 and R2 outputs are properly separated
+    let output1_content = fs::read_to_string(&output_path1).unwrap();
+    let output2_content = fs::read_to_string(&output_path2).unwrap();
+
+    assert!(!output1_content.is_empty(), "Output R1 file is empty");
+    assert!(!output2_content.is_empty(), "Output R2 file is empty");
+
+    // Verify R1 output contains only /1 reads
+    assert!(
+        output1_content.contains("/1"),
+        "R1 output should contain /1 reads"
+    );
+    assert!(
+        !output1_content.contains("/2"),
+        "R1 output should NOT contain /2 reads"
+    );
+
+    // Verify R2 output contains only /2 reads
+    assert!(
+        output2_content.contains("/2"),
+        "R2 output should contain /2 reads"
+    );
+    assert!(
+        !output2_content.contains("/1"),
+        "R2 output should NOT contain /1 reads"
+    );
+
+    // Count records in each file (4 lines per FASTQ record)
+    let r1_records = output1_content
+        .lines()
+        .filter(|l| l.starts_with('@'))
+        .count();
+    let r2_records = output2_content
+        .lines()
+        .filter(|l| l.starts_with('@'))
+        .count();
+
+    assert_eq!(
+        r1_records, r2_records,
+        "R1 and R2 should have the same number of records"
+    );
+    assert_eq!(r1_records, 2, "Should have 2 pairs in output");
+}
+
+#[test]
+fn test_single_read_stdin() {
+    let temp_dir = tempdir().unwrap();
+    let fasta_path = temp_dir.path().join("ref.fasta");
+    let fastq_path = temp_dir.path().join("reads.fastq");
+    let bin_path = temp_dir.path().join("ref.bin");
+    let output_path = temp_dir.path().join("filtered.fastq");
+
+    create_test_fasta(&fasta_path);
+
+    let fastq_content = "@read1\nACGTGCATAGCTGCATGCATGCATGCATGCATGCATGCAATGCAACGTGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2\nTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATTGCAGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
+    fs::write(&fastq_path, fastq_content).unwrap();
+
+    build_index(&fasta_path, &bin_path);
+    assert!(bin_path.exists(), "Index file wasn't created");
+
+    // Test single-end stdin
+    let mut cmd = StdCommand::new(cargo::cargo_bin!("deacon"));
+    let output = cmd
+        .arg("filter")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
+        .arg(&bin_path)
+        .arg("-") // stdin
+        .arg("--output")
+        .arg(&output_path)
+        .stdin(File::open(&fastq_path).unwrap())
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(
+        output.status.success(),
+        "Command failed for single-read stdin"
+    );
+    assert!(
+        output_path.exists(),
+        "Output file wasn't created for single-read stdin"
+    );
+
+    let output_content = fs::read_to_string(&output_path).unwrap();
+    assert!(
+        !output_content.is_empty(),
+        "Output file is empty for single-read stdin"
+    );
+    assert!(
+        output_content.contains("read1"),
+        "read1 not found in output"
+    );
+    assert!(
+        output_content.contains("read2"),
+        "read2 not found in output"
+    );
+}
+
+#[test]
 fn test_filter_filtration_fwd() {
     // Tests filtering with forward reads from SC2
     let temp_dir = tempdir().unwrap();
@@ -528,7 +690,7 @@ fn test_filter_filtration_fwd() {
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -537,8 +699,10 @@ fn test_filter_filtration_fwd() {
         .arg(&output_path)
         .arg("--summary")
         .arg(&summary_path)
-        .arg("--matches")
+        .arg("--abs-threshold")
         .arg("1")
+        .arg("--rel-threshold")
+        .arg("0.01")
         .assert()
         .success();
 
@@ -565,7 +729,7 @@ fn test_filter_filtration_rev() {
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -600,7 +764,7 @@ fn test_filter_paired_filtration_fwd() {
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -633,7 +797,7 @@ fn test_filter_paired_filtration_rev() {
     build_index(&fasta_path, &bin_path);
     assert!(bin_path.exists(), "Index file wasn't created");
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -652,29 +816,27 @@ fn test_filter_paired_filtration_rev() {
 
 #[cfg(test)]
 mod output2_tests {
-    use assert_cmd::Command;
+    use assert_cmd::cargo;
     use std::fs;
     use std::path::Path;
     use std::process::Command as StdCommand;
     use tempfile::tempdir;
 
     fn create_test_fasta(path: &Path) {
-        let fasta_content = ">seq1\nACGTACGTACGT\n>seq2\nGTACGTACGTAC\n";
+        let fasta_content = ">seq1\nATTAAAGGTTTATACCTTCCCAGGTAACAAACCAACCAACTTTCGATCTCTTGTAGATCTGTTCTCTAAA\n>seq2\nCGAACTTTAAAATCTGTGTGGCTGTCACTCGGCTGCATGCTTAGTGCACTCACGCAGTATAATTAATAAC\n";
         fs::write(path, fasta_content).unwrap();
     }
 
     fn create_test_paired_fastq(path1: &Path, path2: &Path) {
-        let fastq_content1 =
-            "@read1\nACGTACGTACGT\n+\n~~~~~~~~~~~~\n@read2\nGTACGTACGTAC\n+\n~~~~~~~~~~~~\n";
-        let fastq_content2 =
-            "@read1\nTGCATGCATGCA\n+\n~~~~~~~~~~~~\n@read2\nCATGCATGCATG\n+\n~~~~~~~~~~~~\n";
+        let fastq_content1 = "@read1\nATTAAAGGTTTATACCTTCCCAGGTAACAAACCAACCAACTTTCGATCTCTTGTAGATCTGTTCTCTAAA\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2\nCGAACTTTAAAATCTGTGTGGCTGTCACTCGGCTGCATGCTTAGTGCACTCACGCAGTATAATTAATAAC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
+        let fastq_content2 = "@read1\nTAATTACTGTCGTTGACAGGACACGAGTAACTCGTCTATCTTCTGCAGGCTGCTTACGGTTTCGTCCGTG\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n@read2\nTTGCAGCCGATCATCAGCACATCTAGGTTTCGTCCGGGTGTGACCGAAAGGTAAGATGGAGAGCCTTGTC\n+\n~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n";
 
         fs::write(path1, fastq_content1).unwrap();
         fs::write(path2, fastq_content2).unwrap();
     }
 
     fn build_index(fasta_path: &Path, bin_path: &Path) {
-        let output = StdCommand::new(assert_cmd::cargo::cargo_bin("deacon"))
+        let output = StdCommand::new(cargo::cargo_bin!("deacon"))
             .arg("index")
             .arg("build")
             .arg(fasta_path)
@@ -692,9 +854,8 @@ mod output2_tests {
         let fastq_path1 = temp_dir.path().join("reads_1.fastq");
         let fastq_path2 = temp_dir.path().join("reads_2.fastq");
         let bin_path = temp_dir.path().join("ref.bin");
-        let output_path1 = temp_dir.path().join("filtered_1.fastq");
-        let output_path2 = temp_dir.path().join("filtered_2.fastq");
-        let summary_path = temp_dir.path().join("summary.json");
+        let output_path1 = temp_dir.path().join("filtered_1.fastq.gz");
+        let output_path2 = temp_dir.path().join("filtered_2.fastq.gz");
 
         create_test_fasta(&fasta_path);
         create_test_paired_fastq(&fastq_path1, &fastq_path2);
@@ -702,11 +863,9 @@ mod output2_tests {
         build_index(&fasta_path, &bin_path);
         assert!(bin_path.exists(), "Index file wasn't created");
 
-        // Run filtering command with separate output files (using -m 0 so short sequences pass through)
-        let mut cmd = Command::cargo_bin("deacon").unwrap();
+        // Run filtering command with separate output files
+        let mut cmd = cargo::cargo_bin_cmd!("deacon");
         cmd.arg("filter")
-            .arg("-m")
-            .arg("0")
             .arg(&bin_path)
             .arg(&fastq_path1)
             .arg(&fastq_path2)
@@ -714,28 +873,50 @@ mod output2_tests {
             .arg(&output_path1)
             .arg("--output2")
             .arg(&output_path2)
-            .arg("--summary")
-            .arg(&summary_path)
             .assert()
             .success();
 
         // Check both output files were created
         assert!(output_path1.exists(), "First output file wasn't created");
         assert!(output_path2.exists(), "Second output file wasn't created");
-        assert!(summary_path.exists(), "Summary file wasn't created");
 
         // Validate output content
-        let output1_content = fs::read_to_string(&output_path1).unwrap();
-        let output2_content = fs::read_to_string(&output_path2).unwrap();
-
-        assert!(!output1_content.is_empty(), "First output file is empty");
-        assert!(!output2_content.is_empty(), "Second output file is empty");
-
-        // Check that the summary includes output2 path
-        let summary_content = fs::read_to_string(&summary_path).unwrap();
         assert!(
-            summary_content.contains("output2"),
-            "Summary doesn't mention output2"
+            fs::metadata(&output_path1).unwrap().len() > 0,
+            "First gzipped output file is empty"
+        );
+        assert!(
+            fs::metadata(&output_path2).unwrap().len() > 0,
+            "Second gzipped output file is empty"
+        );
+
+        // Actually decompress and check if there are reads
+        use flate2::read::GzDecoder;
+        use std::fs::File;
+        use std::io::Read;
+
+        let file1 = File::open(&output_path1).unwrap();
+        let mut gz1 = GzDecoder::new(file1);
+        let mut contents1 = String::new();
+        gz1.read_to_string(&mut contents1).unwrap();
+
+        let file2 = File::open(&output_path2).unwrap();
+        let mut gz2 = GzDecoder::new(file2);
+        let mut contents2 = String::new();
+        gz2.read_to_string(&mut contents2).unwrap();
+
+        println!(
+            "Output2 test - Output1 length: {}, Output2 length: {}",
+            contents1.len(),
+            contents2.len()
+        );
+        println!(
+            "Output2 test - Output1 preview: {:?}",
+            &contents1.chars().take(100).collect::<String>()
+        );
+        println!(
+            "Output2 test - Output2 preview: {:?}",
+            &contents2.chars().take(100).collect::<String>()
         );
     }
 
@@ -753,7 +934,7 @@ mod output2_tests {
         create_test_paired_fastq(&fastq_path1, &fastq_path2);
         build_index(&fasta_path, &bin_path);
 
-        let mut cmd = Command::cargo_bin("deacon").unwrap();
+        let mut cmd = cargo::cargo_bin_cmd!("deacon");
         cmd.arg("filter")
             .arg(&bin_path)
             .arg(&fastq_path1)
@@ -783,6 +964,35 @@ mod output2_tests {
             fs::metadata(&output_path2).unwrap().len() > 0,
             "Second gzipped output file is empty"
         );
+
+        // Actually decompress and check if there are reads
+        use flate2::read::GzDecoder;
+        use std::fs::File;
+        use std::io::Read;
+
+        let file1 = File::open(&output_path1).unwrap();
+        let mut gz1 = GzDecoder::new(file1);
+        let mut contents1 = String::new();
+        gz1.read_to_string(&mut contents1).unwrap();
+
+        let file2 = File::open(&output_path2).unwrap();
+        let mut gz2 = GzDecoder::new(file2);
+        let mut contents2 = String::new();
+        gz2.read_to_string(&mut contents2).unwrap();
+
+        println!(
+            "Gzip test - Output1 length: {}, Output2 length: {}",
+            contents1.len(),
+            contents2.len()
+        );
+        println!(
+            "Gzip test - Output1 preview: {:?}",
+            &contents1.chars().take(100).collect::<String>()
+        );
+        println!(
+            "Gzip test - Output2 preview: {:?}",
+            &contents2.chars().take(100).collect::<String>()
+        );
     }
 
     #[test]
@@ -800,7 +1010,7 @@ mod output2_tests {
         build_index(&fasta_path, &bin_path);
 
         // Run filtering command with output2 but no second input (should warn)
-        let mut cmd = Command::cargo_bin("deacon").unwrap();
+        let mut cmd = cargo::cargo_bin_cmd!("deacon");
         cmd.arg("filter")
             .arg(&bin_path)
             .arg(&fastq_path)
@@ -856,7 +1066,7 @@ fn test_shared_minimizer_counted_once() {
     // If shared minimizers are counted once (correct): total hits = 1, pair kept (1 < 2)
     // If shared minimizers are counted twice (bug): total hits = 2+, pair filtered (2+ >= 2)
     // Using --deplete to restore original behavior for this bug test
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
         .arg("--deplete")
         .arg(&bin_path)
@@ -866,8 +1076,10 @@ fn test_shared_minimizer_counted_once() {
         .arg(&output_path)
         .arg("--summary")
         .arg(&summary_path)
-        .arg("--matches")
-        .arg("2") // Critical parameter: any pair with 2+ hits gets filtered
+        .arg("--abs-threshold")
+        .arg("2")
+        .arg("--rel-threshold")
+        .arg("0.01") // Critical parameter: any pair with 2+ hits gets filtered
         .assert()
         .success();
 
@@ -890,7 +1102,8 @@ fn test_shared_minimizer_counted_once() {
     assert_eq!(
         seqs_out, 2,
         "Expected 2 sequences in output (both reads of the pair should be kept) \
-         but got {seqs_out}. This indicates shared minimizers were double-counted."
+         but got {}. This indicates shared minimizers were double-counted.",
+        seqs_out
     );
 }
 
@@ -906,9 +1119,11 @@ fn test_filter_proportional_threshold() {
     create_test_fastq(&fastq_path);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
+        .arg("1")
+        .arg("--rel-threshold")
         .arg("0.5") // 50% proportional threshold
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -936,9 +1151,11 @@ fn test_filter_proportional_paired() {
     create_test_paired_fastq(&fastq_path1, &fastq_path2);
     build_index(&fasta_path, &bin_path);
 
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
+        .arg("1")
+        .arg("--rel-threshold")
         .arg("0.3") // 30% proportional threshold
         .arg(&bin_path)
         .arg(&fastq_path1)
@@ -967,9 +1184,11 @@ fn test_filter_edge_case_proportional_values() {
     build_index(&fasta_path, &bin_path);
 
     // Test with 0.0 (should pass everything)
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
+        .arg("1")
+        .arg("--rel-threshold")
         .arg("0.0")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -980,9 +1199,11 @@ fn test_filter_edge_case_proportional_values() {
 
     // Test with 1.0 (very strict)
     let output_path_strict = temp_dir.path().join("filtered_strict.fastq");
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("filter")
-        .arg("--matches")
+        .arg("--abs-threshold")
+        .arg("1")
+        .arg("--rel-threshold")
         .arg("1.0")
         .arg(&bin_path)
         .arg(&fastq_path)
@@ -999,4 +1220,170 @@ fn test_filter_edge_case_proportional_values() {
         output_path_strict.exists(),
         "Output with 1.0 threshold wasn't created"
     );
+}
+
+#[test]
+fn test_multiline_fasta_matching() {
+    let temp_dir = tempdir().unwrap();
+    let ref_path = temp_dir.path().join("ref.fasta");
+    let query_path = temp_dir.path().join("query.fasta");
+    let bin_path = temp_dir.path().join("ref.bin");
+    let output_path = temp_dir.path().join("output.fasta");
+
+    let reference_fasta = ">ref\nACGTTTAAGGCCAACCACACACACACACATT\n";
+    let query_fasta = ">query\nACGTTTAAGGCCAACC\nACACACACACACATT\n";
+
+    fs::write(&ref_path, reference_fasta).unwrap();
+    fs::write(&query_path, query_fasta).unwrap();
+
+    // Build index with k=31, w=1
+    let output = StdCommand::new(cargo::cargo_bin!("deacon"))
+        .arg("index")
+        .arg("build")
+        .arg("-k")
+        .arg("31")
+        .arg("-w")
+        .arg("1")
+        .arg(&ref_path)
+        .output()
+        .expect("Failed to execute index command");
+
+    fs::write(&bin_path, output.stdout).expect("Failed to write index file");
+    assert!(output.status.success(), "Index build command failed");
+
+    // Filter with -a 1
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("filter")
+        .arg("-a")
+        .arg("1")
+        .arg(&bin_path)
+        .arg(&query_path)
+        .arg("-o")
+        .arg(&output_path)
+        .assert()
+        .success();
+
+    // Verify that mid record newline doesn't break match
+    let output_content = fs::read_to_string(&output_path).unwrap();
+    assert!(
+        !output_content.is_empty(),
+        "Multiline FASTA should match indexed sequence"
+    );
+    assert!(
+        output_content.contains(">query"),
+        "Output should contain query header"
+    );
+    assert!(
+        output_content.contains("ACGTTTAAGGCCAACCACACACACACACATT"),
+        "Output should contain the full sequence"
+    );
+}
+
+#[test]
+fn test_newline_mapping_bug() {
+    let temp_dir = tempdir().unwrap();
+    let ref_path = temp_dir.path().join("reference.fa");
+    let query_path = temp_dir.path().join("query.fa");
+    let bin_path = temp_dir.path().join("ref.bin");
+    let output_path = temp_dir.path().join("output.fa");
+
+    // Create reference file with sequence split across lines
+    // The newlines should be stripped but if they're not, they'll be mapped to 'C'
+    let ref_content = ">reference\nAAAAA\nAAAAA\nAAAAA\nAAAAA\n";
+    fs::write(&ref_path, ref_content).unwrap();
+
+    // Create query file with Cs where newlines would be
+    let query_content = ">query\nAAAAACAAAAACAAAAACAAAAA\n";
+    fs::write(&query_path, query_content).unwrap();
+
+    // Build index with k=5, w=5 (k+w-1 must be odd: 5+5-1=9, odd ✓)
+    let output = StdCommand::new(cargo::cargo_bin!("deacon"))
+        .arg("index")
+        .arg("build")
+        .arg("-k")
+        .arg("5")
+        .arg("-w")
+        .arg("5")
+        .arg(&ref_path)
+        .output()
+        .expect("Failed to execute index command");
+
+    fs::write(&bin_path, output.stdout).expect("Failed to write index file");
+    assert!(output.status.success(), "Index build command failed");
+
+    // Filter query against index
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("filter")
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
+        .arg(&bin_path)
+        .arg(&query_path)
+        .arg("-o")
+        .arg(&output_path)
+        .assert()
+        .success();
+
+    // Read filtered output
+    let output_str = fs::read_to_string(&output_path).unwrap();
+
+    // If newlines are being mapped to C, the query would match
+    // The bug would cause the reference "AAAAA\nAAAAA\nAAAAA\nAAAAA" to become
+    // "AAAAACAAAAACAAAAACAAAAA" after mapping newlines to C
+    // So if the bug exists, the query would match and be filtered (kept with deplete=false)
+
+    // With the bug, we'd expect a match. Without the bug, no match.
+    if output_str.contains(">query") {
+        panic!(
+            "BUG DETECTED: Query matched due to newlines being mapped to 'C'. Output: {}",
+            output_str
+        );
+    }
+
+    println!("Test passed - no false matches from newline mapping");
+}
+
+#[test]
+fn test_large_kmer_filter() {
+    let temp_dir = tempdir().unwrap();
+    let fasta_path = temp_dir.path().join("test.fasta");
+    let bin_path = temp_dir.path().join("test.bin");
+    let fastq_path = temp_dir.path().join("test.fastq");
+
+    create_test_fasta(&fasta_path);
+    create_test_fastq(&fastq_path);
+
+    // Index with k=41 (u128 code path)
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("index")
+        .arg("build")
+        .arg("-k")
+        .arg("41")
+        .arg("-w")
+        .arg("15")
+        .arg(&fasta_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .assert()
+        .success();
+
+    // Test filtering with our k=41 index
+    let output = cargo::cargo_bin_cmd!("deacon")
+        .arg("filter")
+        .arg(&bin_path)
+        .arg(&fastq_path)
+        .arg("-a")
+        .arg("1")
+        .arg("-r")
+        .arg("0.0")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "Filter command failed");
+
+    // Should retain both seqs
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let num_sequences = stdout.lines().filter(|line| line.starts_with('@')).count();
+    assert_eq!(num_sequences, 2, "Should retain both sequences");
 }

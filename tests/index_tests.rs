@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo;
 use std::fs;
 use std::path::Path;
 use tempfile::tempdir;
@@ -21,7 +21,7 @@ fn create_test_fasta(path: &Path, variant: usize) {
 
 // Index builder helper
 fn build_index(fasta_path: &Path, bin_path: &Path) {
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("index")
         .arg("build")
         .arg(fasta_path)
@@ -33,7 +33,8 @@ fn build_index(fasta_path: &Path, bin_path: &Path) {
     // Check file exists and isn't empty
     assert!(
         bin_path.exists(),
-        "Index file wasn't created at {bin_path:?}"
+        "Index file wasn't created at {:?}",
+        bin_path
     );
     assert!(
         fs::metadata(bin_path).unwrap().len() > 0,
@@ -62,7 +63,7 @@ fn test_index_build_with_custom_kmer_window() {
     create_test_fasta(&fasta_path, 1);
 
     // Build index with custom k-mer length and window size using -o
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("index")
         .arg("build")
         .arg(fasta_path)
@@ -98,7 +99,7 @@ fn test_index_union() {
     build_index(&fasta2_path, &bin2_path);
 
     // Combine indexes
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("index")
         .arg("union")
         .arg("-o")
@@ -119,7 +120,9 @@ fn test_index_union() {
     let max_individual_size = std::cmp::max(bin1_size, bin2_size);
     assert!(
         combined_size >= max_individual_size,
-        "Combined index size {combined_size} should be at least as large as the largest individual index size {max_individual_size}"
+        "Combined index size {} should be at least as large as the largest individual index size {}",
+        combined_size,
+        max_individual_size
     );
 }
 
@@ -141,7 +144,7 @@ fn test_index_diff() {
     build_index(&fasta2_path, &bin2_path);
 
     // Diff second index from first
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("index")
         .arg("diff")
         .arg("-o")
@@ -160,7 +163,9 @@ fn test_index_diff() {
 
     assert!(
         result_size <= bin1_size,
-        "Result index size {result_size} should be less than or equal to the first index size {bin1_size}"
+        "Result index size {} should be less than or equal to the first index size {}",
+        result_size,
+        bin1_size
     );
 }
 
@@ -184,8 +189,7 @@ fn test_index_diff_three_methods() {
     build_index(&fasta2_path, &bin2_path);
 
     // Method 1: Index + Index diff
-    let output1 = Command::cargo_bin("deacon")
-        .unwrap()
+    let output1 = cargo::cargo_bin_cmd!("deacon")
         .arg("index")
         .arg("diff")
         .arg("-o")
@@ -197,8 +201,7 @@ fn test_index_diff_three_methods() {
     assert!(output1.status.success());
 
     // Method 2: Index + FASTX file diff (with explicit k,w)
-    let output2 = Command::cargo_bin("deacon")
-        .unwrap()
+    let output2 = cargo::cargo_bin_cmd!("deacon")
         .arg("index")
         .arg("diff")
         .arg("-k")
@@ -215,8 +218,7 @@ fn test_index_diff_three_methods() {
 
     // Method 3: Index + FASTX stdin diff (auto-detect k,w)
     let fasta2_content = fs::read(&fasta2_path).unwrap();
-    let output3 = Command::cargo_bin("deacon")
-        .unwrap()
+    let output3 = cargo::cargo_bin_cmd!("deacon")
         .arg("index")
         .arg("diff")
         .arg("-o")
@@ -252,7 +254,10 @@ fn test_index_diff_three_methods() {
                 }
             }
         }
-        panic!("Could not extract remaining minimizer count from stderr: {stderr_str}");
+        panic!(
+            "Could not extract remaining minimizer count from stderr: {}",
+            stderr_str
+        );
     }
 
     let remaining1 = extract_remaining_count(&output1.stderr);
@@ -262,11 +267,13 @@ fn test_index_diff_three_methods() {
     // All three methods should produce the same number of remaining minimizers
     assert_eq!(
         remaining1, remaining2,
-        "Index+Index ({remaining1}) and Index+FASTX ({remaining2}) should have same remaining count"
+        "Index+Index ({}) and Index+FASTX ({}) should have same remaining count",
+        remaining1, remaining2
     );
     assert_eq!(
         remaining1, remaining3,
-        "Index+Index ({remaining1}) and Index+FASTX stdin ({remaining3}) should have same remaining count"
+        "Index+Index ({}) and Index+FASTX stdin ({}) should have same remaining count",
+        remaining1, remaining3
     );
 
     // Verify all result files have the same size (they should be identical)
@@ -301,8 +308,7 @@ fn test_index_diff_auto_detect_parameters() {
     build_index(&fasta1_path, &bin1_path);
 
     // Method 1: Auto-detect k,w from first index
-    let output_auto = Command::cargo_bin("deacon")
-        .unwrap()
+    let output_auto = cargo::cargo_bin_cmd!("deacon")
         .arg("index")
         .arg("diff")
         .arg("-o")
@@ -314,8 +320,7 @@ fn test_index_diff_auto_detect_parameters() {
     assert!(output_auto.status.success());
 
     // Method 2: Explicitly specify k,w (should match index defaults)
-    let output_explicit = Command::cargo_bin("deacon")
-        .unwrap()
+    let output_explicit = cargo::cargo_bin_cmd!("deacon")
         .arg("index")
         .arg("diff")
         .arg("-k")
@@ -337,5 +342,132 @@ fn test_index_diff_auto_detect_parameters() {
     assert_eq!(
         auto_content, explicit_content,
         "Auto-detected and explicit parameters should produce identical results"
+    );
+}
+
+#[test]
+fn test_index_dump() {
+    let temp_dir = tempdir().unwrap();
+    let fasta_path = temp_dir.path().join("test.fasta");
+    let bin_path = temp_dir.path().join("test.bin");
+    let dump_path = temp_dir.path().join("dump.fa");
+
+    // All As
+    let test_sequence = ">test\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
+    fs::write(&fasta_path, test_sequence).unwrap();
+
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("index")
+        .arg("build")
+        .arg(&fasta_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .assert()
+        .success();
+
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("index")
+        .arg("dump")
+        .arg(&bin_path)
+        .arg("-o")
+        .arg(&dump_path)
+        .assert()
+        .success();
+
+    // Check dump contains exactly one minimizer
+    let dump_content = fs::read_to_string(&dump_path).unwrap();
+    let lines: Vec<&str> = dump_content.trim().lines().collect();
+
+    assert_eq!(lines.len(), 2, "Should have one record");
+    assert_eq!(lines[0], ">1", "Header should be '>1'");
+    assert_eq!(lines[1], "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "Just 31 As");
+}
+
+#[test]
+fn test_index_intersect() {
+    let temp_dir = tempdir().unwrap();
+    let fasta1_path = temp_dir.path().join("test1.fasta");
+    let fasta2_path = temp_dir.path().join("test2.fasta");
+    let bin1_path = temp_dir.path().join("test1.bin");
+    let bin2_path = temp_dir.path().join("test2.bin");
+    let intersect_path = temp_dir.path().join("intersect.bin");
+
+    create_test_fasta(&fasta1_path, 1);
+    create_test_fasta(&fasta2_path, 2);
+
+    build_index(&fasta1_path, &bin1_path);
+    build_index(&fasta2_path, &bin2_path);
+
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.arg("index")
+        .arg("intersect")
+        .arg("-o")
+        .arg(&intersect_path)
+        .arg(&bin1_path)
+        .arg(&bin2_path)
+        .assert()
+        .success();
+
+    assert!(intersect_path.exists());
+
+    // The intersection should smaller or equal to either index size
+    let intersect_size = fs::metadata(&intersect_path).unwrap().len();
+    let bin1_size = fs::metadata(&bin1_path).unwrap().len();
+    let bin2_size = fs::metadata(&bin2_path).unwrap().len();
+
+    assert!(
+        intersect_size <= bin1_size,
+        "Intersection size {} should be <= first index size {}",
+        intersect_size,
+        bin1_size
+    );
+    assert!(
+        intersect_size <= bin2_size,
+        "Intersection size {} should be <= second index size {}",
+        intersect_size,
+        bin2_size
+    );
+}
+
+#[test]
+fn test_index_truncated() {
+    let temp_dir = tempdir().unwrap();
+    let fasta_path = temp_dir.path().join("test.fasta");
+    let bin_path = temp_dir.path().join("test.bin");
+    let truncated_path = temp_dir.path().join("truncated.bin");
+
+    create_test_fasta(&fasta_path, 1);
+    build_index(&fasta_path, &bin_path);
+    let original_size = fs::metadata(&bin_path).unwrap().len();
+
+    // Create a truncated copy (keep 90%)
+    let original_content = fs::read(&bin_path).unwrap();
+    let truncated_size = (original_size * 9) / 10;
+    fs::write(
+        &truncated_path,
+        &original_content[..truncated_size as usize],
+    )
+    .unwrap();
+
+    // Try using trunc index
+    let output = cargo::cargo_bin_cmd!("deacon")
+        .arg("index")
+        .arg("info")
+        .arg(&truncated_path)
+        .output()
+        .unwrap();
+
+    // Fails hopefully
+    assert!(
+        !output.status.success(),
+        "Loading truncated index should fail"
+    );
+
+    // Should have a helpful error message (not a panic)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("corrupt") || stderr.contains("Failed to load minimizer batch"),
+        "Error message should mention corruption or batch load failure. Got: {}",
+        stderr
     );
 }

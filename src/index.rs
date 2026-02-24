@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::ProgressBar;
@@ -91,23 +91,14 @@ pub fn load_header_and_count<P: AsRef<Path>>(path: &P) -> Result<(IndexHeader, u
     Ok((header, count))
 }
 
-static INDEX: OnceLock<(PathBuf, crate::MinimizerSet, IndexHeader)> = OnceLock::new();
-
 pub fn load_minimizers_cached(
     path: Option<&Path>,
     server_address: &Option<String>,
 ) -> Result<(Option<crate::MinimizerSet>, IndexHeader)> {
     if let Some(path) = path {
-        let (p, minimizers, header) = INDEX.get_or_init(|| {
-            let (m, h) = load_minimizers(path).unwrap();
-            (path.to_owned(), m, h)
-        });
-        assert_eq!(
-            p, path,
-            "Currently, the server can only have one index loaded."
-        );
+        let (m, h) = load_minimizers(path).unwrap();
 
-        Ok((Some(minimizers.clone()), header.clone()))
+        Ok((Some(m), h))
     } else if let Some(server_address) = server_address {
         // If no path is provided, check if a server adress was given to populate the header
         #[cfg(feature = "server")]

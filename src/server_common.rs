@@ -5,7 +5,7 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 /// Request structure for filtering sequences
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FilterSequencesRequest {
     /// Sequences to filter
     pub sequences: Vec<Vec<u8>>,
@@ -27,7 +27,7 @@ pub struct FilterSequencesRequest {
 }
 
 /// Response structure for sequence filtering results
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FilterSequencesResponse {
     /// Results for each sequence
     /// Each tuple contains:
@@ -38,7 +38,7 @@ pub struct FilterSequencesResponse {
 }
 
 /// Request structure for filtering paired sequences
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FilterPairedSequencesRequest {
     /// Sequences to filter
     pub sequences: Vec<(Vec<u8>, Vec<u8>)>,
@@ -60,7 +60,7 @@ pub struct FilterPairedSequencesRequest {
 }
 
 /// Response structure for sequence filtering paired results
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FilterPairedSequencesResponse {
     /// Results for each pair of sequences
     /// Each tuple contains:

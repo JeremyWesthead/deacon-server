@@ -57,7 +57,7 @@ enum Commands {
         deplete: bool,
 
         /// Replace sequence headers with incrementing numbers
-        #[arg(short = 'r', long = "rename", default_value_t = false)]
+        #[arg(short = 'R', long = "rename", default_value_t = false)]
         rename: bool,
 
         /// Path to JSON summary output file
@@ -125,7 +125,7 @@ enum Commands {
         deplete: bool,
 
         /// Replace sequence headers with incrementing numbers
-        #[arg(short = 'r', long = "rename", default_value_t = false)]
+        #[arg(short = 'R', long = "rename", default_value_t = false)]
         rename: bool,
 
         /// Path to JSON summary output file

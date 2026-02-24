@@ -1,19 +1,17 @@
-use assert_cmd::Command;
-use predicates::prelude::*;
+use assert_cmd::cargo;
+use predicates::str;
 
 #[test]
 fn test_version() {
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+        .stdout(str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
 fn test_no_args() {
-    let mut cmd = Command::cargo_bin("deacon").unwrap();
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Usage"));
+    let mut cmd = cargo::cargo_bin_cmd!("deacon");
+    cmd.assert().failure().stderr(str::contains("Usage"));
 }
