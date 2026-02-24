@@ -455,7 +455,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "deacon-server"
+name = "deacon"
 version = "0.13.2"
 dependencies = [
  "anyhow",
