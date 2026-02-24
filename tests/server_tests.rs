@@ -1404,7 +1404,7 @@ fn test_newline_mapping_bug() {
         .output()
         .expect("Failed to execute index command");
 
-    fs::write(&bin_path.clone(), output.stdout).expect("Failed to write index file");
+    fs::write(bin_path.clone(), output.stdout).expect("Failed to write index file");
     assert!(output.status.success(), "Index build command failed");
 
     // Filter query against index

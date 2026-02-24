@@ -110,7 +110,7 @@ pub fn load_minimizers_cached(
         #[cfg(not(feature = "server"))]
         {
             return Err(anyhow::anyhow!(
-                "Server feature is not enabled. Cannot run without an index."
+                "Server feature is not enabled. Cannot run without an index. Attempted to run on {server_address}"
             ));
         }
     } else {

@@ -109,13 +109,15 @@ Options:
           Path to output fastx file (or - for stdout; detects .gz and .zst) [default: -]
   -O, --output2 <OUTPUT2>
           Optional path to second paired output fastx file (detects .gz and .zst)
-  -m, --matches <MATCH_THRESHOLD>
-          Mininum number (integer) or proportion (float) of minimizer hits for a match [default: 2]
+  -a, --abs-threshold <ABS_THRESHOLD>
+          Minimum absolute number of minimizer hits for a match [default: 2]
+  -r, --rel-threshold <REL_THRESHOLD>
+          Minimum relative proportion (0.0-1.0) of minimizer hits for a match [default: 0.01]
   -p, --prefix-length <PREFIX_LENGTH>
           Search only the first N nucleotides per sequence (0 = entire sequence) [default: 0]
   -d, --deplete
           Discard matching sequences (invert filtering behaviour)
-  -r, --rename
+  -R, --rename
           Replace sequence headers with incrementing numbers
   -s, --summary <SUMMARY>
           Path to JSON summary output file
@@ -123,6 +125,8 @@ Options:
           Number of execution threads (0 = auto) [default: 8]
       --compression-level <COMPRESSION_LEVEL>
           Output compression level (1-9 for gz & xz; 1-22 for zstd) [default: 2]
+      --debug
+          Output sequences with minimizer hits to stderr
   -h, --help
           Print help
 ```
@@ -187,7 +191,8 @@ Use `-s summary.json` to save detailed filtering statistics:
   "output2": null,
   "k": 31,
   "w": 21,
-  "match_threshold": "2",
+  "abs_threshold": "2",
+  "rel_threshold": "0.01",
   "prefix_length": 0,
   "deplete": true,
   "rename": false,
@@ -231,6 +236,8 @@ Almost exactly identical to the `deacon filter` reference, but swapping index pa
 
 #### Usage
 ```bash
+Alternate version of Filter, swapping local compute for passing to a server which has the index pre-loaded. Will inevitably be slower than local filtering, but saves on index loading. Better used for cases of small input + large index
+
 Usage: deacon client [OPTIONS] <SERVER_ADDRESS> [INPUT] [INPUT2]
 
 Arguments:
@@ -243,13 +250,15 @@ Options:
           Path to output fastx file (or - for stdout; detects .gz and .zst) [default: -]
   -O, --output2 <OUTPUT2>
           Optional path to second paired output fastx file (detects .gz and .zst)
-  -m, --matches <MATCH_THRESHOLD>
-          Mininum number (integer) or proportion (float) of minimizer hits for a match [default: 2]
+  -a, --abs-threshold <ABS_THRESHOLD>
+          Minimum absolute number of minimizer hits for a match [default: 2]
+  -r, --rel-threshold <REL_THRESHOLD>
+          Minimum relative proportion (0.0-1.0) of minimizer hits for a match [default: 0.01]
   -p, --prefix-length <PREFIX_LENGTH>
           Search only the first N nucleotides per sequence (0 = entire sequence) [default: 0]
   -d, --deplete
           Discard matching sequences (invert filtering behaviour)
-  -r, --rename
+  -R, --rename
           Replace sequence headers with incrementing numbers
   -s, --summary <SUMMARY>
           Path to JSON summary output file
@@ -257,6 +266,8 @@ Options:
           Number of execution threads (0 = auto) [default: 8]
       --compression-level <COMPRESSION_LEVEL>
           Output compression level (1-9 for gz & xz; 1-22 for zstd) [default: 2]
+      --debug
+          Output sequences with minimizer hits to stderr
   -h, --help
           Print help
 ```
